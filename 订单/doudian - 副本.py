@@ -1,0 +1,485 @@
+import pandas as pd
+import re
+from pathlib import Path
+import os
+import glob
+import sys
+import numpy as np
+from openpyxl import load_workbook, Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+import shutil
+import pymysql
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data_functions import convert_watch_time_to_minutes,process_columns,clean_duplicate_livestream_files,get_latest_file,calculate_all_metrics,calculate_week_excel_style_series
+from qianchuan_juliang_live import swatch_case_time_tran,concat_file_list_data
+import swifter
+from datetime import datetime,timedelta
+
+# 数据库配置
+DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '123456',
+    'database': 'qianchuan_sucai',
+    'charset': 'utf8mb4'
+}
+
+def get_qianchuan_from_db():
+    """从数据库获取千川数据"""
+    connection = pymysql.connect(**DB_CONFIG)
+    try:
+        query = "SELECT * FROM qianchuan_douyin"
+        df = pd.read_sql(query, connection)
+        # 列名映射：数据库列名 -> 代码需要的列名
+        column_mapping = {
+            '小时区间': '时间-小时',
+            '智能优惠券金额': '整体成交智能优惠券金额'
+        }
+        # 应用列名映射
+        df = df.rename(columns=column_mapping)
+        return df
+    finally:
+        connection.close()
+
+###按照整场汇总千川成交
+def qianchuan_group_merge(qianchuan,live_time_day_time,baiyin):
+    qianchuan = qianchuan.merge(live_time_day_time,on=['日期-小时','直播间'])
+    qianchuan = qianchuan.groupby(['直播开始时间','直播间'])[['整体成交金额','整体消耗']].sum().reset_index()
+    qianchuan["日期"] = qianchuan["直播开始时间"].apply(lambda x:x[:10])
+    qianchuan["日期"] = pd.to_datetime(qianchuan["日期"])
+
+    baiyin = baiyin.merge(live_time_day_time,on=['日期-小时','直播间'])
+    baiyin = baiyin.groupby(['直播开始时间','直播间'])[['评论次数','新加直播团人数','新增粉丝数']].sum().reset_index()
+    return qianchuan[["直播开始时间","整体消耗","整体成交金额","直播间"]],baiyin
+
+# 生成小时记录的函数
+def expand_hours(row):
+    try:
+        start = datetime.strptime(row['直播开始时间'], '%Y-%m-%d %H-%M-%S')
+    except:
+        start = datetime.strptime(row['直播开始时间'], '%Y-%m-%d_%H-%M-%S')
+    try:
+        end = datetime.strptime(row['直播结束时间'], '%Y-%m-%d %H-%M-%S')
+    except:
+        end = datetime.strptime(row['直播结束时间'], '%Y-%m-%d_%H-%M-%S')
+    
+    # 调整到整点小时
+    current = start.replace(minute=0, second=0, microsecond=0)
+    end_hour = end.replace(minute=0, second=0, microsecond=0)
+    if end > end_hour:
+        end_hour += timedelta(hours=1)
+    
+    records = []
+    while current < end_hour:
+        records.append({
+            '直播间':row['直播间'],
+            '日期': row['日期'],
+            '直播开始时间': row['直播开始时间'],
+            '直播结束时间': row['直播结束时间'],
+            '小时': current.strftime('%H'),
+            '日期-小时': current.strftime('%Y-%m-%d %H:00')
+        })
+        current += timedelta(hours=1)
+    
+    return records
+def merge_baiyin_qianchuan_data(live_room):
+    # 从数据库获取千川数据
+    print("正在从数据库读取千川数据...")
+    qianchuan_df_modify = get_qianchuan_from_db()
+    if qianchuan_df_modify.empty:
+        print("数据库中没有千川数据")
+        return pd.DataFrame(), pd.DataFrame()
+    print(f"从数据库获取到 {len(qianchuan_df_modify)} 条千川数据")
+
+    # 处理小时区间格式，生成时间-小时列
+    if '时间-小时' in qianchuan_df_modify.columns:
+        # 去除时间-小时中的空格
+        qianchuan_df_modify['时间-小时'] = qianchuan_df_modify['时间-小时'].str.replace(' ', '', regex=False)
+        # 提取小时部分
+        qianchuan_df_modify['小时'] = qianchuan_df_modify['时间-小时'].str.split('-').str[0]
+        # 将日期转换为字符串格式
+        qianchuan_df_modify['日期'] = qianchuan_df_modify['日期'].astype(str)
+        # 重新组合日期和小时为时间-小时格式
+        qianchuan_df_modify['时间-小时'] = qianchuan_df_modify['日期'] + ' ' + qianchuan_df_modify['小时'] + ':00'
+
+    qianchuan_df_modify.to_excel("qianchuan_df_modify1.xlsx",index=False)
+    print("qianchuan_df_modify.columns:",qianchuan_df_modify.columns.tolist())
+
+    #筛选日期为2025-08-27到2025-09-07的数据  ------ 非必要重复
+    # qianchuan_df_modify = filter_time_data(qianchuan_df_modify,'2025-08-31',end_time)
+    # qianchuan_df_modify = swatch_case_time_tran(qianchuan_df_modify,"小时区间")
+    # qianchuan_df_modify['小时'] = qianchuan_df_modify["小时区间"].apply(lambda x:x[:2])
+    datetime_series = pd.to_datetime(qianchuan_df_modify['时间-小时'])
+    qianchuan_df_modify['小时'] = datetime_series.dt.hour
+    qianchuan_df_modify['日期'] = datetime_series.dt.strftime('%Y-%m-%d')
+    qianchuan_df_modify[['整体消耗','整体支付ROI','整体成交金额','整体成交订单数','整体成交订单成本',
+                        '整体成交智能优惠券金额','1小时内退款金额','1小时内退款订单数']] \
+    = qianchuan_df_modify[['整体消耗','整体支付ROI','整体成交金额','整体成交订单数','整体成交订单成本',
+                        '整体成交智能优惠券金额','1小时内退款金额','1小时内退款订单数']]\
+    .applymap(lambda x: float(str(x).replace(',', '')) if pd.notna(x) else x)
+
+    # 百应数据仍从本地文件读取
+    data_path = os.path.join(r"D:\python project\python project", live_room)
+
+    # 定义百应文件名的开头模式
+    file_pattern = "*流量综合趋势分析下载_数据更新日期*"
+    file_list = glob.glob(os.path.join(data_path, f"{file_pattern}.xlsx"))
+
+
+    baiyin_df = concat_file_list_data(file_list)
+    # baiyin_df["小时"] = baiyin_df["时间"].apply(lambda x:x[11:13])
+    # baiyin_df["时间"] = pd.to_datetime(baiyin_df['时间'])
+    # baiyin_df["时间"] = baiyin_df["时间"].apply(lambda x:x[:10]).apply(lambda x:x.replace("/","-"))
+
+    # 转换为datetime格式
+    baiyin_df["datetime"] = pd.to_datetime(baiyin_df["时间"], format="%Y/%m/%d %H:%M")
+    baiyin_df["datetime"] = baiyin_df["datetime"].dt.floor('H')  # 向下取整到小时
+
+    # 提取小时（保持两位数格式）
+    baiyin_df["小时"] = baiyin_df["datetime"].dt.strftime("%H")
+
+    # 格式化日期
+    baiyin_df["时间"] = baiyin_df["datetime"].dt.strftime("%Y-%m-%d")
+    baiyin_df["datetime"] = baiyin_df["datetime"].dt.strftime('%Y-%m-%d %H:00')
+
+    baiyin_df_modify = swatch_case_time_tran(baiyin_df,"小时")
+    baiyin_df_modify = baiyin_df_modify.drop_duplicates()
+    baiyin_df_modify = baiyin_df_modify[['时间','datetime','小时','评论次数','新加直播团人数','新增粉丝数']]
+    baiyin_df_modify.rename(columns={'时间': '日期',"datetime":"日期-小时"}, inplace=True)
+    # qianchuan_df_modify = day_of_week_chinese(qianchuan_df_modify)
+    # baiyin_df_modify = day_of_week_chinese(baiyin_df_modify)
+    baiyin_df_modify.to_excel("baiyin_df_modify.xlsx")
+    return baiyin_df_modify,qianchuan_df_modify
+
+def return_column_rate(df,df_rate,df_son,df_prents):
+    """
+    安全计算占比
+    """
+    df[df_rate] = df.swifter.apply(lambda row: 
+                row[df_son] / row[df_prents] 
+                if row[df_prents] != 0 else 0, 
+                axis=1)
+    return df
+
+
+def daliy_data_bash(df,live_room=['日期', '周', '月']):
+    """
+    店铺GMV未扣退（已加平台券）	"扣退店铺成交
+    (已加平台券)"	"扣退店铺成交
+    (未加平台券)"	退款金额占比	"自播
+    销售占比"	"达人
+    销售占比"	小店自卖-销售占比	"总单量
+    （已扣退）"	"总客单
+    （已扣退）"	商品卡销售占比	短视频销售占比
+    """
+    df['日期'] = pd.to_datetime(df['订单提交时间']).dt.date
+    if "直播间" not in live_room:
+        use_col = ['日期',"订单提交时间","支付完成时间","周","月","主订单编号","是否自播","是否达播","是否退款"
+                ,"流量来源","流量体裁","平台实际承担优惠金额","商家实际承担优惠金额","达人实际承担优惠金额","退款金额","订单应付金额"]
+    else:
+        use_col = ['日期',"直播间","订单提交时间","支付完成时间","周","月","主订单编号","是否自播","是否达播","是否退款"
+                ,"流量来源","流量体裁","平台实际承担优惠金额","商家实际承担优惠金额","达人实际承担优惠金额","退款金额","订单应付金额"]       
+    daily_df = df[use_col].copy()
+    
+    daily_df['平台实际承担优惠金额'] = pd.to_numeric(daily_df['平台实际承担优惠金额'], errors='coerce').fillna(0)
+    daily_df['商家实际承担优惠金额'] = pd.to_numeric(daily_df['商家实际承担优惠金额'], errors='coerce').fillna(0)
+    daily_df['达人实际承担优惠金额'] = pd.to_numeric(daily_df['达人实际承担优惠金额'], errors='coerce').fillna(0)
+    daily_df['退款金额'] = pd.to_numeric(daily_df['退款金额'], errors='coerce').fillna(0)
+    daily_df['订单应付金额'] = pd.to_numeric(daily_df['订单应付金额'], errors='coerce').fillna(0)
+
+    daily_df["达播销售金额"] = np.where(
+    daily_df["是否达播"] == "达播",
+    daily_df['平台实际承担优惠金额'] + daily_df['订单应付金额']  + daily_df['达人实际承担优惠金额'],
+    0,
+)
+    
+    daily_df["自播销售金额"] = np.where(
+    daily_df["是否自播"] == "自播",
+    daily_df['平台实际承担优惠金额'] + daily_df['订单应付金额']  + daily_df['达人实际承担优惠金额'],
+    0,
+)
+    
+    daily_df["小店自卖销售金额"] = np.where(
+    daily_df["流量来源"] == "小店自卖",
+    daily_df['平台实际承担优惠金额'] + daily_df['订单应付金额']  + daily_df['达人实际承担优惠金额'],
+    0,
+)      
+    
+    daily_df["商品卡销售金额"] = np.where(
+    daily_df["流量体裁"] == "商品卡",
+    daily_df['平台实际承担优惠金额'] + daily_df['订单应付金额']  + daily_df['达人实际承担优惠金额'],
+    0,
+)     
+    
+    daily_df["短视频销售金额"] = np.where(
+    daily_df["流量体裁"] == "短视频",
+    daily_df['平台实际承担优惠金额'] + daily_df['订单应付金额']  + daily_df['达人实际承担优惠金额'],
+    0,
+)
+    daily_df["其他销售金额"] = np.where(
+    daily_df["流量体裁"] == "其他",
+    daily_df['平台实际承担优惠金额'] + daily_df['订单应付金额']  + daily_df['达人实际承担优惠金额'],
+    0,
+)      
+    # 然后进行分组聚合
+    daily_df = daily_df.groupby(live_room).agg({
+        '主订单编号':'nunique',
+        '平台实际承担优惠金额': 'sum',
+        '商家实际承担优惠金额': 'sum',
+        '达人实际承担优惠金额': 'sum',
+        '自播销售金额': 'sum',
+        '达播销售金额': 'sum',
+        '小店自卖销售金额': 'sum',
+        '商品卡销售金额': 'sum',
+        '短视频销售金额': 'sum',
+        '其他销售金额': 'sum',
+        '退款金额': 'sum',
+        '订单应付金额': 'sum',
+    }).reset_index()
+    daily_df = daily_df.rename(columns={"主订单编号":"总订单数"})
+    # 退款订单部分
+
+    group_list = live_room.copy()
+    group_list.extend(["是否退款"])
+    daily_df_return = df[use_col].groupby(group_list).agg({
+        '主订单编号':'nunique'
+    }).reset_index()
+    daily_df_return = daily_df_return[daily_df_return["是否退款"]==1]
+    daily_df_return = daily_df_return.rename(columns={"主订单编号":"退款订单数"})
+    # 计算指标
+    split_col = ['平台实际承担优惠金额','退款金额','订单应付金额','商家实际承担优惠金额','达人实际承担优惠金额'
+                               ,'自播销售金额','达播销售金额','小店自卖销售金额','商品卡销售金额','短视频销售金额','其他销售金额','总订单数']
+    split_col.extend(live_room)
+
+    daily_df_split = daily_df[split_col].copy()
+    daily_df_split['店铺GMV(已加平台券)未扣退'] = daily_df_split['订单应付金额'] + daily_df_split["平台实际承担优惠金额"] + daily_df['达人实际承担优惠金额']
+    daily_df_split['扣退店铺成交(已加平台券)'] = daily_df_split['店铺GMV(已加平台券)未扣退'] - daily_df_split['退款金额']
+    daily_df_split['扣退店铺成交(未加平台券)'] = daily_df_split['扣退店铺成交(已加平台券)'] - daily_df_split['平台实际承担优惠金额']
+    
+    ##退款占比
+    daily_df_split = return_column_rate(daily_df_split,'退款金额占比','退款金额','店铺GMV(已加平台券)未扣退')
+    ##自播销售占比
+    daily_df_split = return_column_rate(daily_df_split,'自播销售占比','自播销售金额','店铺GMV(已加平台券)未扣退')
+    ##达播销售占比
+    daily_df_split = return_column_rate(daily_df_split,'达播销售占比','达播销售金额','店铺GMV(已加平台券)未扣退')
+    ##小店自卖销售占比
+    daily_df_split = return_column_rate(daily_df_split,'小店自卖销售占比','小店自卖销售金额','店铺GMV(已加平台券)未扣退')
+    ##商品卡销售占比
+    daily_df_split = return_column_rate(daily_df_split,'商品卡销售占比','商品卡销售金额','店铺GMV(已加平台券)未扣退')
+    ##短视频销售占比
+    daily_df_split = return_column_rate(daily_df_split,'短视频销售占比','短视频销售金额','店铺GMV(已加平台券)未扣退')
+    ##其他销售占比
+    daily_df_split = return_column_rate(daily_df_split,'其他销售占比','其他销售金额','店铺GMV(已加平台券)未扣退')
+    ##合并退款订单数据
+    daily_df_merge = daily_df_split.merge(daily_df_return,on=live_room)
+    ##总单数(已扣退)
+    daily_df_merge['总单数(已扣退)'] = daily_df_merge['总订单数']-daily_df_merge['退款订单数']
+    ##客单价(已扣退)
+    daily_df_merge = return_column_rate(daily_df_merge,'客单价(已扣退)','扣退店铺成交(未加平台券)','总单数(已扣退)')
+    if "直播间" not in live_room:
+        use_col = ['日期','周','月','店铺GMV(已加平台券)未扣退','扣退店铺成交(已加平台券)','扣退店铺成交(未加平台券)','退款金额占比','自播销售金额','自播销售占比','达播销售金额','达播销售占比','短视频销售金额','短视频销售占比','商品卡销售金额','商品卡销售占比','其他销售金额','其他销售占比','总单数(已扣退)','客单价(已扣退)','总订单数']
+    else:
+        use_col = ['日期','周','月','直播间','店铺GMV(已加平台券)未扣退','扣退店铺成交(已加平台券)','扣退店铺成交(未加平台券)','退款金额占比','自播销售金额','自播销售占比','达播销售金额','达播销售占比','短视频销售金额','短视频销售占比','商品卡销售金额','商品卡销售占比','其他销售金额','其他销售占比','总单数(已扣退)','客单价(已扣退)','总订单数']
+    daily_df_merge = daily_df_merge[use_col]
+    return daily_df_merge
+###自播销售金额	自播销售占比	达播销售金额	达播销售占比	短视频销售金额	短视频销售占比	商品卡销售金额	商品卡销售占比	其他销售金额	其他销售占比	总单数(已扣退)	客单价(已扣退)
+
+def daily_self_data_bash(df,live_time_day_time,group_level=['日期','周','月']):
+    """
+    "自播成交
+    （未扣退）"	"自播成交
+    （扣退）"	"销售数
+    （件）"	退款金额占比	总单量
+    """
+    live_time_day_time["日期"] = pd.to_datetime(live_time_day_time['日期'])
+    df['日期'] = pd.to_datetime(df['订单提交时间']).dt.date
+    df['小时'] = pd.to_datetime(df['订单提交时间']).dt.hour.astype('int')
+
+    df['日期'] = pd.to_datetime(df['日期'])
+    df['日期-小时'] = df['日期'] + pd.to_timedelta(df['小时'], unit='h')
+    df['日期-小时'] = df['日期-小时'].dt.strftime('%Y-%m-%d %H:00')
+
+    df = df.merge(live_time_day_time[['日期-小时','直播开始时间','直播间']],on=['日期-小时','直播间'])
+
+    if "直播间" not in group_level:
+        use_col = ['直播开始时间',"订单提交时间","支付完成时间","商品数量","主订单编号","是否自播","是否达播","是否退款"
+                ,"流量来源","流量体裁","平台实际承担优惠金额","商家实际承担优惠金额","达人实际承担优惠金额","退款金额","订单应付金额"]
+        sort_col = ['直播开始时间',"自播成交(未扣退)","自播成交(扣退)","销售数","退款金额占比","总单量"]
+    else:
+        use_col = ['直播开始时间',"直播间","订单提交时间","支付完成时间","商品数量","主订单编号","是否自播","是否达播","是否退款"
+                ,"流量来源","流量体裁","平台实际承担优惠金额","商家实际承担优惠金额","达人实际承担优惠金额","退款金额","订单应付金额"]
+        sort_col = ["直播间",'直播开始时间',"自播成交(未扣退)","自播成交(扣退)","销售数","退款金额占比","总单量"]
+    daily_self_df = df[use_col][df["是否自播"]=="自播"].copy()
+    
+    daily_self_df['平台实际承担优惠金额'] = pd.to_numeric(daily_self_df['平台实际承担优惠金额'], errors='coerce').fillna(0)
+    daily_self_df['商家实际承担优惠金额'] = pd.to_numeric(daily_self_df['商家实际承担优惠金额'], errors='coerce').fillna(0)
+    daily_self_df['达人实际承担优惠金额'] = pd.to_numeric(daily_self_df['达人实际承担优惠金额'], errors='coerce').fillna(0)
+    daily_self_df['退款金额'] = pd.to_numeric(daily_self_df['退款金额'], errors='coerce').fillna(0)
+    daily_self_df['订单应付金额'] = pd.to_numeric(daily_self_df['订单应付金额'], errors='coerce').fillna(0)
+    daily_self_df['自播销售金额'] = daily_self_df['订单应付金额'] + daily_self_df["平台实际承担优惠金额"]
+
+    daily_self_df = daily_self_df.groupby(group_level).agg({
+        '主订单编号':'nunique',
+        '商品数量': 'sum', 
+        '自播销售金额': 'sum',
+        '退款金额': 'sum'
+    }).reset_index()
+    daily_self_df = daily_self_df.rename(columns={"主订单编号":"总单量","商品数量":"销售数","自播销售金额":"自播成交(未扣退)"})
+
+    daily_self_df["自播成交(扣退)"] = daily_self_df["自播成交(未扣退)"] - daily_self_df["退款金额"]
+    daily_self_df = return_column_rate(daily_self_df,'退款金额占比',"退款金额","自播成交(未扣退)")
+    
+
+    return daily_self_df[sort_col]
+
+def liuliang_data(quanyu_analysis_data):
+    df = quanyu_analysis_data.copy()
+    # 统一时间格式，将下划线替换为空格
+    df['直播开始时间'] = df['直播开始时间'].str.replace('_', ' ')
+    df['直播结束时间'] = df['直播结束时间'].str.replace(' ', ' ')
+
+    # 将时间字符串转换为datetime格式
+    df['直播开始时间'] = pd.to_datetime(df['直播开始时间'], format='%Y-%m-%d %H-%M-%S')
+    df['直播结束时间'] = pd.to_datetime(df['直播结束时间'], format='%Y-%m-%d %H-%M-%S')
+
+    # 计算直播时长（小时）
+    df['直播时长_小时'] = (df['直播结束时间'] - df['直播开始时间']).dt.total_seconds() / 3600
+    df_pivot = df.pivot_table(columns=['渠道名称'],index=['直播间','直播开始日期','直播开始时间','直播结束时间','直播时长_小时'],values=['成交金额_占比','观看次数_占比'])
+    return df_pivot
+ 
+if __name__ == "__main__": 
+    ###订单数据``
+    file_path = r"D:\python project\python project\订单"
+    clean_floder = r"D:\python project\python project"
+    baiyin_data = pd.DataFrame()
+    qianchuan_data = pd.DataFrame()
+    data = pd.DataFrame() 
+    quanyu_analysis_data = pd.DataFrame()
+    quanyu_live_data = pd.DataFrame()
+    # name_list = [{"name":"弹动官方旗舰店","data":"2025年订单.csv","live_room":"鱼子酱"}]  
+
+    name_list = [{"name":"弹动官方旗舰店","data":"1773624427_ebf24eddb01a3c2c1c7faed3fc0e6857cSqUBCXQ.csv","live_room":"鱼子酱"}
+                 ,{"name":"弹动个护旗舰店","data":"1773624710_f7c2f3cbb84700468998c82610b68ca3NzkMwoHT.csv","live_room":"椰子"}]
+    for name_dict in name_list:
+        file_name = os.path.join(file_path,name_dict["data"])
+        df = pd.read_csv(file_name) 
+        df["直播间"] = name_dict["name"] 
+        data = pd.concat([df,data])
+        clean_path = os.path.join(clean_floder,name_dict["live_room"])
+        clean_duplicate_livestream_files(clean_path)
+
+        ###千川消耗&百应流量
+        baiyin,qianchuan = merge_baiyin_qianchuan_data(name_dict["live_room"])
+        if baiyin.shape[0]:
+
+            baiyin["直播间"] = name_dict["name"]
+            baiyin_data = pd.concat([baiyin_data,baiyin])
+
+            qianchuan["直播间"] = name_dict["name"]
+            qianchuan_data = pd.concat([qianchuan_data,qianchuan])
+
+            ###全域流量
+            latest_file = get_latest_file(name_dict["live_room"])
+            quanyu = pd.read_excel(latest_file,sheet_name="流量分析-渠道分析")
+            quanyu_tran_data = pd.read_excel(latest_file,sheet_name="流量&转化-转化漏斗")[['直播开始时间','日期','直播间曝光-观看率(人数)','直播间观看人数','直播间观看-商品曝光率(人数)'
+                                                                                   ,'直播间曝光-成交转化率(人数)','直播间商品曝光-点击率(人数)','直播间商品点击-成交转化率(人数)','直播间观看-成交转化率(人数)','平均在线人数'
+                                                                                   ,'直播间曝光人数','商品曝光人数','商品点击人数','成交人数']]
+            
+            quanyu_basic_data = pd.read_excel(latest_file,sheet_name="基本信息")[['直播开始时间','日期',"直播结束时间",'千次观看成交金额']]
+
+            quanyu_live = quanyu_tran_data.merge(quanyu_basic_data,on=['直播开始时间','日期'])
+            quanyu_live["直播间"] = name_dict["name"]
+            quanyu_live_data = pd.concat([quanyu_live_data,quanyu_live])
+
+            quanyu_analysis = calculate_all_metrics(quanyu)
+            quanyu_analysis["直播间"] = name_dict["name"]
+            quanyu_analysis_data = pd.concat([quanyu_analysis_data,quanyu_analysis])
+        else: 
+            continue
+    live_time_day_time = quanyu_live_data[['直播开始时间','日期',"直播结束时间","直播间"]].copy()
+    live_time_day_time_new = pd.DataFrame([record for _, row in live_time_day_time.iterrows() for record in expand_hours(row)])
+    live_time_day_time_new["小时"] = live_time_day_time_new['小时'].astype('int')
+    live_time_day_time_new.to_excel("live_time_day_time_new.xlsx",index=False)
+    live_time_day_time.to_excel("live_time_day_time.xlsx",index=False)
+    qianchuan_data["日期-小时"] = qianchuan_data["时间-小时"]
+    live_time_gmv,baiyin_modify_data = qianchuan_group_merge(qianchuan_data,live_time_day_time_new,baiyin_data)
+
+    quanyu_live_data = quanyu_live_data.merge(live_time_gmv,on=['直播间',"直播开始时间"])
+    
+    return_column_rate(quanyu_live_data,'UV价值','整体成交金额','直播间观看人数')
+    
+    avg_live_online_count = quanyu_analysis_data[quanyu_analysis_data["渠道名称"]=="整体"][["直播开始时间","直播间","人均观看时长"]]
+
+    quanyu_live_data = quanyu_live_data.merge(avg_live_online_count,on=["直播开始时间","直播间"]).merge(baiyin_modify_data,on=["直播开始时间","直播间"])
+
+    quanyu_live_data = quanyu_live_data[['直播间','直播开始时间','日期','直播间曝光-观看率(人数)','直播间观看人数','直播间商品曝光-点击率(人数)'
+                                         ,'直播间商品点击-成交转化率(人数)','直播间观看-成交转化率(人数)'
+                                         ,'平均在线人数','人均观看时长','新增粉丝数','评论次数','千次观看成交金额','UV价值','直播间曝光人数','商品曝光人数','商品点击人数','成交人数']]
+    for col in data.columns:
+        data[col] = data[col].swifter.apply(lambda x:x.replace("\t","") if isinstance(x, str) else x)
+    data[['平台实际承担优惠金额','订单应付金额','商家实际承担优惠金额','达人实际承担优惠金额']] \
+    = data[['平台实际承担优惠金额','订单应付金额','商家实际承担优惠金额','达人实际承担优惠金额']]\
+    .applymap(lambda x: float(str(x).replace(',', '')) if pd.notna(x) else x)
+
+    data = data[data["支付完成时间"]!=""]
+    data = data[~data['支付完成时间'].isna()]
+    
+    print("订单提交时间:", data.count())
+    data["周"] = calculate_week_excel_style_series(data["订单提交时间"])
+    data["月"] = data["订单提交时间"].swifter.apply(lambda x:pd.to_datetime(x).month)
+    ##TODO
+    data["是否自播"] = np.where(
+        ((data["达人昵称"] == "弹动官方旗舰店") | (data["达人昵称"] == "弹动个人护理旗舰店") | (data["达人昵称"] == "弹动官方旗舰店直播间")) & (data["流量体裁"] == "直播"),
+        "自播",
+        "非自播"
+    )
+
+    # data["是否自播"] = np.where(
+    #     ((data["达人昵称"] == "弹动官方旗舰店")) & (data["流量体裁"] == "直播"),
+    #     "自播",
+    #     "非自播"
+    # )
+
+    data["是否达播"] = np.where(
+        (data["达人昵称"] != "弹动官方旗舰店") & (data["达人昵称"] != "弹动个人护理旗舰店") & (data["达人昵称"] != "弹动官方旗舰店直播间") & (data["流量体裁"] == "直播"),
+        "达播",
+        "非达播"
+    )
+    data["是否退款"] = np.where(
+        (data["售后状态"] == "退款成功") | (data["售后状态"] == "已全额退款"),
+        1,
+        0
+    )
+
+    data["退款金额"] = np.where(
+        (data["售后状态"] == "退款成功") | (data["售后状态"] == "已全额退款"),
+        data["平台实际承担优惠金额"] + data["订单应付金额"] + data['达人实际承担优惠金额'],
+        0
+    )
+    data = process_columns(data)
+    print(data.head())
+    print(data.info())
+    data[['主订单编号','子订单编号','商品ID']] = data[['主订单编号','子订单编号','商品ID']].astype("str")
+
+    data_daliy = daliy_data_bash(data)
+    data_daily_self = daliy_data_bash(data,['日期', '周', '月', '直播间'])
+    data_daily_group_live_room_self = daily_self_data_bash(data,live_time_day_time_new, ['直播间','直播开始时间'])
+    data_daily_group_live_room_self.to_excel("data_daily_group_live_room_self.xlsx",index=False)
+    quanyu_analysis_pivot = liuliang_data(quanyu_analysis_data)
+
+    with pd.ExcelWriter('订单数据_弹动——1.xlsx') as writer:
+        data_daliy.to_excel(writer, sheet_name='日报', index=False)
+        data_daily_self.to_excel(writer, sheet_name="分直播间日报",index=False)
+        data_daily_group_live_room_self[data_daily_group_live_room_self["直播间"]=="弹动官方旗舰店"].to_excel(writer, sheet_name='弹动官方旗舰店', index=False)
+
+        data_daily_group_live_room_self[data_daily_group_live_room_self["直播间"]=="弹动个护旗舰店"].to_excel(writer, sheet_name='弹动个护旗舰店', index=False)
+
+        data_daily_group_live_room_self[data_daily_group_live_room_self["直播间"]=="弹动人参直播间"].to_excel(writer, sheet_name='弹动人参直播间', index=False)
+
+        # data.to_excel(writer, sheet_name='明细数据', index=False)
+        # data_daily_group_live_room_self.to_excel(writer, sheet_name="data_daily_group_live_room_self", index=False)
+        quanyu_analysis_data.to_excel(writer, sheet_name="quanyu_analysis_data", index=False)
+        qianchuan_data.to_excel(writer, sheet_name="qianchuan_data", index=False)
+        quanyu_analysis_pivot.to_excel(writer, sheet_name="quanyu_analysis_pivot")
+        quanyu_live_data.to_excel(writer, sheet_name="quanyu_live_data",index=False)
+        live_time_gmv.to_excel(writer, sheet_name="live_time_gmv",index=False)

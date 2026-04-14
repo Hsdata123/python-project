@@ -1,0 +1,13 @@
+*.xlsx
+*/*.xlsx
+*/*/*.xlsx
+~.xlsx
+*.csv
+*/*.csv
+*/*/*.csv
+__pycache__/
+*.pyc
+build/
+dist/
+.vscode/
+.idea/
