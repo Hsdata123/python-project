@@ -418,7 +418,7 @@ def clean_duplicate_livestream_files(directory_path):
 
 def get_latest_file(live_room):
     # 定义文件模式
-    path = r"D:\python project\合并结果"
+    path = r"D:\python project\python project\合并结果"
     file_pattern = f"合并后的直播数据_{live_room}_*.xlsx"  # 如果是其他格式可以修改
     file_pattern = os.path.join(path,file_pattern)
     # 获取所有匹配的文件

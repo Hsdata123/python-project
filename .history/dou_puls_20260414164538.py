@@ -3,10 +3,67 @@ import os
 import re
 from datetime import datetime
 import glob
-from qianchuan_juliang_live import swatch_case_time_tran,concat_file_list_data,convert_to_percentage,end_time,today
+import pymysql
+from qianchuan_juliang_live import swatch_case_time_tran,concat_file_list_data,convert_to_percentage,today
 from data_functions import calculate_all_metrics,expand_hours,clean_duplicate_livestream_files,calculate_all_metrics
 
-live_room = "椰子"
+# 数据库配置
+DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '123456',
+    'database': 'qianchuan_sucai',
+    'charset': 'utf8mb4'
+}
+
+# 百应数据库配置
+BAIYIN_DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '123456',
+    'database': 'baiyin_data',
+    'charset': 'utf8mb4'
+}
+
+# 账号名称映射
+LIVE_ROOM_MAPPING = {
+    "鱼子酱": "弹动官方旗舰店",
+    "椰子": "弹动个人护理旗舰店"
+}
+
+def get_baiyin_traffic_from_db(live_room):
+    """从百应数据库获取流量综合趋势数据"""
+    account_name = LIVE_ROOM_MAPPING.get(live_room)
+    if not account_name:
+        print(f"未知的直播间: {live_room}")
+        return pd.DataFrame()
+
+    connection = pymysql.connect(**BAIYIN_DB_CONFIG)
+    try:
+        query = f"SELECT * FROM traffic_trend WHERE `账号名称`='{account_name}'"
+        df = pd.read_sql(query, connection)
+        return df
+    finally:
+        connection.close()
+
+def get_qianchuan_from_db(live_room):
+    """从数据库获取千川数据"""
+    connection = pymysql.connect(**DB_CONFIG)
+    try:
+        query = "SELECT * FROM qianchuan_douyin where `账号名称`='{}'".format(LIVE_ROOM_MAPPING[live_room])
+        df = pd.read_sql(query, connection)
+        # 列名映射：数据库列名 -> 代码需要的列名
+        column_mapping = {
+            '小时区间': '时间-小时',
+            '智能优惠券金额': '整体成交智能优惠券金额'
+        }
+        # 应用列名映射
+        df = df.rename(columns=column_mapping)
+        return df
+    finally:
+        connection.close()
+
+
 def day_of_week_chinese(df):
     # 生成星期列
     # 创建星期映射字典
@@ -24,42 +81,40 @@ def day_of_week_chinese(df):
     return df
 
 def merge_baiyin_qianchuan_data(live_room):
-    #遍历文件夹下的千川文数据文件
-    data_path = os.path.join(r"D:\python project\python project", live_room)
-    file_list = glob.glob(os.path.join(data_path, "*.xlsx"))
-    
-    # 更严格的正则表达式，确保只匹配时间戳格式的文件
-    pattern = r'^\d{4}-\d{2}-\d{2} \d{2}_\d{2}_\d{2}_\d{19}\.xlsx$'
-    matched_files = [f for f in file_list if re.match(pattern, os.path.basename(f))]
-    print("matched_files:",matched_files)
-    qianchuan_df_modify = concat_file_list_data(matched_files)
+    # 从数据库获取千川数据
+    print("正在从数据库读取千川数据...")
+    qianchuan_df_modify = get_qianchuan_from_db(live_room)
+    if qianchuan_df_modify.empty:
+        print("数据库中没有千川数据")
+        return pd.DataFrame(), pd.DataFrame()
+    print(f"从数据库获取到 {len(qianchuan_df_modify)} 条千川数据")
+
+    # 处理小时区间格式，生成时间-小时列
+    if '时间-小时' in qianchuan_df_modify.columns:
+        # 去除时间-小时中的空格
+        qianchuan_df_modify['时间-小时'] = qianchuan_df_modify['时间-小时'].str.replace(' ', '', regex=False)
+        # 提取小时部分
+        qianchuan_df_modify['小时'] = qianchuan_df_modify['时间-小时'].str.split('-').str[0]
+        # 将日期转换为字符串格式
+        qianchuan_df_modify['日期'] = qianchuan_df_modify['日期'].astype(str)
+        # 重新组合日期和小时为时间-小时格式
+        qianchuan_df_modify['时间-小时'] = qianchuan_df_modify['日期'] + ' ' + qianchuan_df_modify['小时'] + ':00'
+
     qianchuan_df_modify.to_excel("qianchuan_df_modify1.xlsx",index=False)
-    print("qianchuan_df_modify.columns:",qianchuan_df_modify)
-    #筛选日期为2025-08-27到2025-09-07的数据  ------ 非必要重复
-    # qianchuan_df_modify = filter_time_data(qianchuan_df_modify,'2025-08-31',end_time)
-    # qianchuan_df_modify = swatch_case_time_tran(qianchuan_df_modify,"小时区间")
-    # qianchuan_df_modify['小时'] = qianchuan_df_modify["小时区间"].apply(lambda x:x[:2])
-    datetime_series = pd.to_datetime(qianchuan_df_modify['时间-小时'])
-    qianchuan_df_modify['小时'] = datetime_series.dt.hour
-    qianchuan_df_modify['日期'] = datetime_series.dt.strftime('%Y-%m-%d')
-    qianchuan_df_modify[['整体消耗','整体支付ROI','整体成交金额','整体成交订单数','整体成交订单成本',
-                        '整体成交智能优惠券金额','1小时内退款金额','1小时内退款订单数']] \
-    = qianchuan_df_modify[['整体消耗','整体支付ROI','整体成交金额','整体成交订单数','整体成交订单成本',
-                        '整体成交智能优惠券金额','1小时内退款金额','1小时内退款订单数']]\
-    .applymap(lambda x: float(str(x).replace(',', '')) if pd.notna(x) else x)
+    print("qianchuan_df_modify.columns:",qianchuan_df_modify.columns.tolist())
+    print("qianchuan_df_modify 日期-小时 示例:", qianchuan_df_modify['日期-小时'].head().tolist() if '日期-小时' in qianchuan_df_modify.columns else "无日期-小时列")
 
-    # 定义百应文件名的开头模式
-    file_pattern = "*流量综合趋势分析下载_数据更新日期*"
-    file_list = glob.glob(os.path.join(data_path, f"{file_pattern}.xlsx"))
-    print(file_list)
+    # 百应数据从数据库读取
+    print("正在从数据库读取百应流量数据...")
+    baiyin_df = get_baiyin_traffic_from_db(live_room)
+    if baiyin_df.empty:
+        print("数据库中没有百应流量数据")
+        return pd.DataFrame(), pd.DataFrame()
+    print(f"从数据库获取到 {len(baiyin_df)} 条百应流量数据")
 
-    baiyin_df = concat_file_list_data(file_list)
-    # baiyin_df["小时"] = baiyin_df["时间"].apply(lambda x:x[11:13])
-    # baiyin_df["时间"] = pd.to_datetime(baiyin_df['时间'])
-    # baiyin_df["时间"] = baiyin_df["时间"].apply(lambda x:x[:10]).apply(lambda x:x.replace("/","-"))
-
-    # 转换为datetime格式
-    baiyin_df["datetime"] = pd.to_datetime(baiyin_df["时间"], format="%Y/%m/%d %H:%M")
+    # 处理百应数据格式
+    # 转换为datetime格式（数据库格式为 YYYY-MM-DD HH:MM，Excel格式为 %Y/%m/%d %H:%M）
+    baiyin_df["datetime"] = pd.to_datetime(baiyin_df["时间"], format="mixed")
     baiyin_df["datetime"] = baiyin_df["datetime"].dt.floor('H')  # 向下取整到小时
 
     # 提取小时（保持两位数格式）
@@ -73,6 +128,11 @@ def merge_baiyin_qianchuan_data(live_room):
     baiyin_df_modify = baiyin_df_modify.drop_duplicates()
     baiyin_df_modify = baiyin_df_modify[['时间','datetime','小时','评论次数','新加直播团人数','新增粉丝数']]
     baiyin_df_modify.rename(columns={'时间': '日期',"datetime":"日期-小时"}, inplace=True)
+
+    # 将百应数据的数字列转换为数字类型
+    baiyin_df_modify[['评论次数','新加直播团人数','新增粉丝数']] = baiyin_df_modify[['评论次数','新加直播团人数','新增粉丝数']].apply(
+        lambda x: pd.to_numeric(x, errors='coerce')
+    )
     
     qianchuan_df_modify = day_of_week_chinese(qianchuan_df_modify)
     baiyin_df_modify = day_of_week_chinese(baiyin_df_modify)
@@ -105,7 +165,7 @@ def  process_live_time(data_dict):
             return None
         # 使用正则表达式提取开始时间部分
         match = re.search(r'(\d{4}-\d{2}-\d{2}[_ ]\d{2}-\d{2}-\d{2})~', str(time_str))
-        if match:
+        if match: 
             return match.group(1).replace(' ', '_')  # 统一转换为下划线格式
         return None
     
@@ -172,7 +232,7 @@ def  process_live_time(data_dict):
                 print(f"匹配后的开始时间: {df['直播开始时间'].tolist()[:5]}")
                 print(f"匹配后的日期: {df['日期'].tolist()[:5]}")
                 print(f"成功匹配数量: {df['直播开始时间'].notna().sum()}/{len(df)}")
-    
+
     # 更新字典中的各个sheet
     for sheet_name in data_dict.keys():
         if sheet_name != '基本信息':
@@ -200,7 +260,7 @@ def parse_filename(filename):
         }
     return None
 
-def split_complete_dataframe(df):
+def split_complete_dataframe(df): 
     """
     将完整的直播数据DataFrame拆分为三个子表：
     1. 直播间总体数据（固定第一行）
@@ -355,9 +415,8 @@ def process_excel_files(folder_path):
     first_file = pd.ExcelFile(valid_files[0])
     all_sheet_names = first_file.sheet_names
     print(f"发现 {len(all_sheet_names)} 个sheet: {all_sheet_names}")
-    
+
     # 为每个sheet创建一个空的DataFrame列表
-    # 注意：商品sheet会被拆分成三个sheet，所以需要调整
     merged_data = {sheet_name: [] for sheet_name in all_sheet_names}
     # 添加拆分后的sheet
     merged_data['直播间总体数据'] = []
@@ -367,7 +426,6 @@ def process_excel_files(folder_path):
     # 遍历所有文件，读取每个sheet的数据
     for file_info in file_info_list:
         file_path = file_info['file_path']
-        print(f"正在处理文件: {file_info['filename']}")
         
         try:
             # 读取Excel文件的所有sheet
@@ -611,13 +669,29 @@ def process_columns(merged_data):
     return merged_data_new
 
 def qianchuan_baiyin_group_merge(qianchuan,baiyin,live_time_day_time):
+    print("调试: qianchuan 日期-小时 示例:", qianchuan['日期-小时'].head().tolist() if '日期-小时' in qianchuan.columns else "无")
+    print("调试: live_time_day_time 日期-小时 示例:", live_time_day_time['日期-小时'].head().tolist() if '日期-小时' in live_time_day_time.columns else "无")
+
+    # 统一日期格式：将日期-小时列转换为统一的格式 "YYYY-MM-DD HH:00"
+    if '日期-小时' in qianchuan.columns:
+        qianchuan['日期-小时'] = pd.to_datetime(qianchuan['日期-小时']).dt.strftime('%Y-%m-%d %H:00')
+    if '日期-小时' in live_time_day_time.columns:
+        live_time_day_time['日期-小时'] = pd.to_datetime(live_time_day_time['日期-小时']).dt.strftime('%Y-%m-%d %H:00')
+
+    print("调试: 格式化后 qianchuan 日期-小时 示例:", qianchuan['日期-小时'].head().tolist() if '日期-小时' in qianchuan.columns else "无")
+    print("调试: 格式化后 live_time_day_time 日期-小时 示例:", live_time_day_time['日期-小时'].head().tolist() if '日期-小时' in live_time_day_time.columns else "无")
 
     qianchuan = qianchuan.merge(live_time_day_time,on=['日期-小时'])
     baiyin = baiyin.merge(live_time_day_time,on=['日期-小时'])
-    qianchuan = qianchuan.groupby(['直播开始时间'])[['整体消耗','整体支付ROI','整体成交金额','整体成交订单数','整体成交订单成本',
+    qianchuan = qianchuan.groupby(['直播开始时间'])[['整体消耗','整体支付ROI','整体成交金额','整体成交订单数','整体成交订单成本','净成交金额',
                         '整体成交智能优惠券金额','1小时内退款金额','1小时内退款订单数']].sum().reset_index()
+    
     qianchuan['整体支付ROI'] = qianchuan.apply(lambda row: 
                     row["整体成交金额"] / row["整体消耗"] 
+                    if row["整体消耗"] != 0 else 0, 
+                    axis=1)
+    qianchuan['净成交ROI'] = qianchuan.apply(lambda row: 
+                    row["净成交金额"] / row["整体消耗"] 
                     if row["整体消耗"] != 0 else 0, 
                     axis=1)
     qianchuan['成交订单成本'] = qianchuan.apply(lambda row:
@@ -913,7 +987,7 @@ def calculate_period_metrics(daily_df, period='W'):
         '1小时内退款订单数', '退款人数', '自然流量观看人数', '付费流量观看人数',
         '商品点击人数', '商品曝光人数', '整体成交金额','直播间曝光人数',
         '整体成交订单数', '整体成交智能优惠券金额', '直播间曝光次数',
-        '观看次数', '评论次数', '新加直播团人数', '新增粉丝数',
+        '观看次数', '评论次数', '新加直播团人数', '新增粉丝数','净成交金额','净成交ROI',
         '观看总时长', '直播场次计数','整体成交订单成本'
     ]
     
@@ -977,7 +1051,7 @@ def calculate_period_metrics(daily_df, period='W'):
     )
     
     period_df['客单价'] = period_df.apply(
-        lambda row: row["整体成交金额"] / row["成交人数"] if row["成交人数"] != 0 else 0, 
+        lambda row: row["整体成交金额"] / row["成交订单数"] if row["成交订单数"] != 0 else 0, 
         axis=1
     )
     
@@ -1092,6 +1166,7 @@ def add_period_ratio(df, period_column, ratio_suffix):
 
 # 修改主函数中的相关部分
 if __name__ == "__main__":
+    live_room = "鱼子酱"
     clean_duplicate_livestream_files(os.path.join(r"D:\python project\python project",live_room))
     merged_data,baiyin_df_modify,qianchuan_df_modify = main(live_room)
     merged_data = process_live_time(merged_data)
@@ -1103,8 +1178,7 @@ if __name__ == "__main__":
     output_folder = os.path.join("./", "合并结果")
     output_file = save_merged_data(merged_data, output_folder)
     live_room_okr_df = live_room_okr_data(merged_data)
-    print("live_room_okr_df:",live_room_okr_df.head())
-    print("live_room_okr_df:",live_room_okr_df.columns)
+
 
     live_room_okr_df["日期"] = pd.to_datetime(live_room_okr_df["日期"])
     live_room_okr_df.drop(columns="新增粉丝数",inplace=True)
@@ -1114,16 +1188,18 @@ if __name__ == "__main__":
     live_time_day_time_new.to_excel("live_time_day_time_new.xlsx",index=False)
 
     baiyin,qianchuan = qianchuan_baiyin_group_merge(qianchuan_df_modify,baiyin_df_modify,live_time_day_time_new)
+    print("调试: 合并后 qianchuan 行数:", len(qianchuan))
+    print("调试: 合并后 baiyin 行数:", len(baiyin))
     baiyin.to_excel("mergebaiyin.xlsx",index=False)
     qianchuan.to_excel("mergeqianchuan.xlsx",index=False)
 
 
-    all_live_room_okr_df = live_room_okr_df.merge(baiyin,on=['直播开始时间','日期']).merge(qianchuan,on=["直播开始时间",'日期'])
+    all_live_room_okr_df = live_room_okr_df.merge(baiyin,on=['直播开始时间','日期'],how="left").merge(qianchuan,on=["直播开始时间",'日期'])
     
     # 计算互动相关指标
     all_live_room_okr_df['客单价'] = all_live_room_okr_df.apply(lambda row: 
-                    row["整体成交金额"] / row["成交人数"] 
-                    if row["成交人数"] != 0 else 0, 
+                    row["整体成交金额"] / row["成交订单数"] 
+                    if row["成交订单数"] != 0 else 0, 
                     axis=1)  
     # 然后再计算退款率
     all_live_room_okr_df['退款率'] = all_live_room_okr_df.apply(lambda row: 
@@ -1161,7 +1237,7 @@ if __name__ == "__main__":
                             row["付费流量观看人数"] / row["直播间观看人数"]
                             if row["直播间观看人数"] != 0 else 0, 
                             axis=1)
-
+    print("all_live_room_okr_df:",all_live_room_okr_df.columns)
     no_radio_all_live_room_okr_df = all_live_room_okr_df.copy()
     # 添加日环比
     all_live_room_okr_df = add_daily_ratio(all_live_room_okr_df)
@@ -1214,80 +1290,89 @@ if __name__ == "__main__":
     # 转换格式
     all_live_room_okr_df = convert_to_percentage(all_live_room_okr_df)
     weekly_df = convert_to_percentage(weekly_df)
-    monthly_df = convert_to_percentage(monthly_df)
+    monthly_df = convert_to_percentage(monthly_df)  
     daily_traffic_final = convert_to_percentage(daily_traffic_final)
     weekly_traffic_df = convert_to_percentage(weekly_traffic_df)
     monthly_traffic_df = convert_to_percentage(monthly_traffic_df)
     no_radio_all_live_room_okr_df = convert_to_percentage(no_radio_all_live_room_okr_df)
+    print("no_radio_all_live_room_okr_df:",no_radio_all_live_room_okr_df.columns)
     # 保存到Excel
-    columns_sort = ['日期','星期','直播间观看人数',"整体消耗",'整体成交金额',"整体支付ROI","观看-成交转化率","点击-成交转化率",
+    columns_sort = ['日期','星期','直播间观看人数',"整体消耗",'整体成交金额',"整体支付ROI","净成交金额","净成交ROI","观看-成交转化率",'曝光-成交转化率',"点击-成交转化率",
                     '千次观看成交金额','客单价','退款率','退款后成交金额','退款后roi','平均在线人数','曝光-观看率',
                     '直播间观看人数','直播间曝光次数','直播间观看人数','整体成交金额','成交人数','成交订单数','千次观看成交金额',
                     'uv价值','人均观看时长','互动率','新增粉丝数','增粉率','新加直播团人数','加团率',
-                    '1小时内退款金额','1小时内退款订单数','退款人数','退款率','自然流量观看人数','自然流量观看占比','付费流量观看人数',
-                    '付费流量观看占比','商品点击人数','商品曝光-点击率','商品点击-成交转化率','客单价',
-                    '直播间曝光人数','直播间观看人数','商品曝光人数','商品点击人数','成交人数','曝光-观看率',
-                    '商品曝光-观看率','商品曝光-点击率','商品点击-成交转化率','整体消耗','整体支付ROI',
-                    '整体成交金额','整体成交订单数','成交订单成本','整体成交智能优惠券金额','千次观看成交金额','直播间曝光次数','观看次数']
+                    '1小时内退款金额','1小时内退款订单数','退款人数','退款率','商品点击人数','商品曝光-点击率','商品点击-成交转化率','客单价',
+                    '直播间曝光人数','直播间观看人数','商品曝光人数','商品点击人数','成交人数','曝光-观看率','曝光-成交转化率',
+                    '商品曝光-观看率','商品曝光-点击率','商品点击-成交转化率']
     
-    no_radio_all_live_room_okr_df = no_radio_all_live_room_okr_df[columns_sort]
-with pd.ExcelWriter(f'直播间核心数据{today}_{live_room}.xlsx') as writer:
-    # 日汇总
-    all_live_room_okr_df_with_room = all_live_room_okr_df.copy()
-    all_live_room_okr_df_with_room.insert(0, '直播间', live_room)
-    all_live_room_okr_df_with_room.to_excel(writer, sheet_name='日汇总', index=False)
-    
-    # 周汇总
-    weekly_df_with_room = weekly_df.copy()
-    weekly_df_with_room.insert(0, '直播间', live_room)
-    weekly_df_with_room.to_excel(writer, sheet_name='周汇总', index=False)
-    
-    # 月汇总
-    monthly_df_with_room = monthly_df.copy()
-    monthly_df_with_room.insert(0, '直播间', live_room)
-    monthly_df_with_room.to_excel(writer, sheet_name='月汇总', index=False)
-    
-    # 流量结构_日
-    daily_traffic_final_with_room = daily_traffic_final.copy()
-    daily_traffic_final_with_room.insert(0, '直播间', live_room)
-    daily_traffic_final_with_room.to_excel(writer, sheet_name='流量结构_日', index=False)
-    
-    # 流量结构_周
-    weekly_traffic_df_with_room = weekly_traffic_df.copy()
-    weekly_traffic_df_with_room.insert(0, '直播间', live_room)
-    weekly_traffic_df_with_room.to_excel(writer, sheet_name='流量结构_周', index=False)
-    
-    # 流量结构_月
-    monthly_traffic_df_with_room = monthly_traffic_df.copy()
-    monthly_traffic_df_with_room.insert(0, '直播间', live_room)
-    monthly_traffic_df_with_room.to_excel(writer, sheet_name='流量结构_月', index=False)
-    
-    # 日登记数据
-    no_radio_all_live_room_okr_df_with_room = no_radio_all_live_room_okr_df.copy()
-    no_radio_all_live_room_okr_df_with_room.insert(0, '直播间', live_room)
-    no_radio_all_live_room_okr_df_with_room.to_excel(writer, sheet_name='日登记数据', index=False)
+    no_radio_all_live_room_okr_df_sort = no_radio_all_live_room_okr_df[columns_sort]
+    with pd.ExcelWriter(f'直播间核心数据{today}_{live_room}.xlsx') as writer:
+        # # 日汇总
+        # all_live_room_okr_df_with_room = all_live_room_okr_df.copy()
+        # all_live_room_okr_df_with_room.insert(0, '直播间', live_room)
+        # all_live_room_okr_df_with_room.to_excel(writer, sheet_name='日汇总', index=False)
+        
+        # # 周汇总
+        # weekly_df_with_room = weekly_df.copy()
+        # weekly_df_with_room.insert(0, '直播间', live_room)
+        # weekly_df_with_room.to_excel(writer, sheet_name='周汇总', index=False)
+        
+        # # 月汇总
+        # monthly_df_with_room = monthly_df.copy()
+        # monthly_df_with_room.insert(0, '直播间', live_room)
+        # monthly_df_with_room.to_excel(writer, sheet_name='月汇总', index=False)
+        
+        # # 流量结构_日
+        # daily_traffic_final_with_room = daily_traffic_final.copy()
+        # daily_traffic_final_with_room.insert(0, '直播间', live_room)
+        # daily_traffic_final_with_room.to_excel(writer, sheet_name='流量结构_日', index=False)
+        
+        # # 流量结构_周
+        # weekly_traffic_df_with_room = weekly_traffic_df.copy()
+        # weekly_traffic_df_with_room.insert(0, '直播间', live_room)
+        # weekly_traffic_df_with_room.to_excel(writer, sheet_name='流量结构_周', index=False)
+        
+        # # 流量结构_月
+        # monthly_traffic_df_with_room = monthly_traffic_df.copy()
+        # monthly_traffic_df_with_room.insert(0, '直播间', live_room)
+        # monthly_traffic_df_with_room.to_excel(writer, sheet_name='流量结构_月', index=False)
+        
+        # 日登记数据
+        no_radio_all_live_room_okr_df_with_room = no_radio_all_live_room_okr_df_sort.copy()
+        no_radio_all_live_room_okr_df_with_room.insert(0, '直播间', live_room)
+        no_radio_all_live_room_okr_df_with_room.to_excel(writer, sheet_name='日登记数据', index=False)
 
-    # 周登记数据
-    no_radio_weekly_df = weekly_df.copy()
-    columns_sort_week = columns_sort.copy()
-    columns_sort_week.remove("星期")
-    columns_sort_week[0]="周"
-    no_radio_weekly_df = no_radio_weekly_df[columns_sort_week]
-    no_radio_weekly_df.insert(0, '直播间', live_room)
-    no_radio_weekly_df.to_excel(writer, sheet_name='周登记数据', index=False)
+        # 周登记数据
+        no_radio_weekly_df = weekly_df.copy()
+        columns_sort_week = columns_sort.copy()
+        columns_sort_week.remove("星期")
+        columns_sort_week[0]="周"
+        no_radio_weekly_df = no_radio_weekly_df[columns_sort_week]
+        no_radio_weekly_df.insert(0, '直播间', live_room)
+        no_radio_weekly_df.to_excel(writer, sheet_name='周登记数据', index=False)
 
-    # 月登记数据
-    no_radio_monthly_df = monthly_df.copy()
-    columns_sort_month = columns_sort.copy()
-    columns_sort_month.remove("星期")
-    columns_sort_month[0]="月"
-    no_radio_monthly_df = no_radio_monthly_df[columns_sort_month]
-    no_radio_monthly_df.insert(0, '直播间', live_room)
-    no_radio_monthly_df.to_excel(writer, sheet_name='月登记数据', index=False)
-    print("数据汇总完成！")
-    print(f"日汇总数据: {len(all_live_room_okr_df)} 行")
-    print(f"周汇总数据: {len(weekly_df)} 行") 
-    print(f"月汇总数据: {len(monthly_df)} 行")
-    print(f"流量结构日度数据: {len(daily_traffic_final)} 行")
-    print(f"流量结构周度数据: {len(weekly_traffic_df)} 行")
-    print(f"流量结构月度数据: {len(monthly_traffic_df)} 行")
+        # 月登记数据
+        no_radio_monthly_df = monthly_df.copy()
+        columns_sort_month = columns_sort.copy()
+        columns_sort_month.remove("星期")
+        columns_sort_month[0]="月"
+        no_radio_monthly_df = no_radio_monthly_df[columns_sort_month]
+        no_radio_monthly_df.insert(0, '直播间', live_room)
+        no_radio_monthly_df.to_excel(writer, sheet_name='月登记数据', index=False)
+
+        # 投放日登记数据
+        toufang_sort_columns = ['日期','整体成交金额','整体消耗','直播间观看人数','千次观看成交金额','客单价','退款率','1小时内退款金额','净成交金额','净成交ROI','整体消耗','整体支付ROI','整体成交金额','成交订单数'
+                                ,'成交订单成本','直播间曝光次数','观看次数','直播间曝光人数','直播间观看人数','商品曝光人数','商品点击人数','成交人数','曝光-观看率','商品曝光-观看率'
+                                ,'商品曝光-点击率','商品点击-成交转化率']
+        toufang_radio_all_live_room_okr_df = no_radio_all_live_room_okr_df.copy()
+        toufang_radio_all_live_room_okr_df = toufang_radio_all_live_room_okr_df[toufang_sort_columns]
+        toufang_radio_all_live_room_okr_df.insert(0, '直播间', live_room)
+        toufang_radio_all_live_room_okr_df.to_excel(writer, sheet_name='投放-日登记数据', index=False)
+
+        print("数据汇总完成！")
+        print(f"日汇总数据: {len(all_live_room_okr_df)} 行")
+        print(f"周汇总数据: {len(weekly_df)} 行") 
+        print(f"月汇总数据: {len(monthly_df)} 行")
+        print(f"流量结构日度数据: {len(daily_traffic_final)} 行")
+        print(f"流量结构周度数据: {len(weekly_traffic_df)} 行")
+        print(f"流量结构月度数据: {len(monthly_traffic_df)} 行")

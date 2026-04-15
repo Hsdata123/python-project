@@ -384,8 +384,8 @@ if __name__ == "__main__":
     quanyu_live_data = pd.DataFrame()
     # name_list = [{"name":"弹动官方旗舰店","data":"2025年订单.csv","live_room":"鱼子酱"}]  
 
-    name_list = [{"name":"弹动官方旗舰店","data":"1776131987_8b3c92894d90dba22a9f0c746e06a841cSqUBCXQ.csv","live_room":"鱼子酱"}
-                 ,{"name":"弹动个护旗舰店","data":"1776132187_4ecd2c1a21a578d4712b0fcc56f01af9NzkMwoHT.csv","live_room":"椰子"}]
+    name_list = [{"name":"弹动官方旗舰店","data":"1776221819_786428ec5fc38c498521156cd46fec7acSqUBCXQ.csv","live_room":"鱼子酱"}
+                 ,{"name":"弹动个护旗舰店","data":"1776222499_5129434345c2d8289f5d0a8fea1bb9daNzkMwoHT.csv","live_room":"椰子"}]
     for name_dict in name_list:
         file_name = os.path.join(file_path,name_dict["data"])
         df = pd.read_csv(file_name) 

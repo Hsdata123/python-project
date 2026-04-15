@@ -100,14 +100,6 @@ def merge_baiyin_qianchuan_data(live_room):
         # 重新组合日期和小时为时间-小时格式
         qianchuan_df_modify['时间-小时'] = qianchuan_df_modify['日期'] + ' ' + qianchuan_df_modify['小时'] + ':00'
 
-    # 如果数据库直接返回'日期-小时'列（某些账号如椰子的情况），确保它存在
-    # 如果'时间-小时'存在但'日期-小时'不存在，从'时间-小时'复制
-    if '日期-小时' not in qianchuan_df_modify.columns and '时间-小时' in qianchuan_df_modify.columns:
-        qianchuan_df_modify['日期-小时'] = qianchuan_df_modify['时间-小时']
-    # 如果'日期-小时'已存在但格式不对，确保格式正确
-    if '日期-小时' in qianchuan_df_modify.columns:
-        qianchuan_df_modify['日期-小时'] = qianchuan_df_modify['日期-小时'].astype(str)
-
     qianchuan_df_modify.to_excel("qianchuan_df_modify1.xlsx",index=False)
     print("qianchuan_df_modify.columns:",qianchuan_df_modify.columns.tolist())
     print("qianchuan_df_modify 日期-小时 示例:", qianchuan_df_modify['日期-小时'].head().tolist() if '日期-小时' in qianchuan_df_modify.columns else "无日期-小时列")
@@ -677,24 +669,14 @@ def process_columns(merged_data):
     return merged_data_new
 
 def qianchuan_baiyin_group_merge(qianchuan,baiyin,live_time_day_time):
-    # 去除重复列，避免 df[col] 返回 DataFrame 而非 Series
-    qianchuan = qianchuan.loc[:, ~qianchuan.columns.duplicated()]
-    live_time_day_time = live_time_day_time.loc[:, ~live_time_day_time.columns.duplicated()]
-
-    print("调试: qianchuan 日期-小时 示例:", qianchuan['日期-小时'].head().tolist() if '日期-小时' in qianchuan.columns and not qianchuan.empty else "无")
-    print("调试: live_time_day_time 日期-小时 示例:", live_time_day_time['日期-小时'].head().tolist() if '日期-小时' in live_time_day_time.columns and not live_time_day_time.empty else "无")
+    print("调试: qianchuan 日期-小时 示例:", qianchuan['日期-小时'].head().tolist() if '日期-小时' in qianchuan.columns else "无")
+    print("调试: live_time_day_time 日期-小时 示例:", live_time_day_time['日期-小时'].head().tolist() if '日期-小时' in live_time_day_time.columns else "无")
 
     # 统一日期格式：将日期-小时列转换为统一的格式 "YYYY-MM-DD HH:00"
     if '日期-小时' in qianchuan.columns:
-        col = qianchuan['日期-小时']
-        if isinstance(col, pd.DataFrame):
-            col = col.iloc[:, 0]  # 取第一列避免重复列问题
-        qianchuan['日期-小时'] = pd.to_datetime(col, errors='coerce').dt.strftime('%Y-%m-%d %H:00')
+        qianchuan['日期-小时'] = pd.to_datetime(qianchuan['日期-小时']).dt.strftime('%Y-%m-%d %H:00')
     if '日期-小时' in live_time_day_time.columns:
-        col = live_time_day_time['日期-小时']
-        if isinstance(col, pd.DataFrame):
-            col = col.iloc[:, 0]
-        live_time_day_time['日期-小时'] = pd.to_datetime(col, errors='coerce').dt.strftime('%Y-%m-%d %H:00')
+        live_time_day_time['日期-小时'] = pd.to_datetime(live_time_day_time['日期-小时']).dt.strftime('%Y-%m-%d %H:00')
 
     print("调试: 格式化后 qianchuan 日期-小时 示例:", qianchuan['日期-小时'].head().tolist() if '日期-小时' in qianchuan.columns else "无")
     print("调试: 格式化后 live_time_day_time 日期-小时 示例:", live_time_day_time['日期-小时'].head().tolist() if '日期-小时' in live_time_day_time.columns else "无")
@@ -736,7 +718,6 @@ def main(live_room):
     
     # 处理文件
     print("开始处理文件...")
-    #TODO 将merged_data 数据源替换成数据库，具体详见目的：直播间整场数据的数据来源由文件替换到对应的数据库中的数据表。.md
     merged_data = process_excel_files(folder_path)
     baiyin_df_modify,qianchuan_df_modify = merge_baiyin_qianchuan_data(live_room)
     # qianchuan_group(qianchuan_df_modify)
@@ -1185,7 +1166,7 @@ def add_period_ratio(df, period_column, ratio_suffix):
 
 # 修改主函数中的相关部分
 if __name__ == "__main__":
-    live_room = "椰子"
+    live_room = "鱼子酱"
     merged_data,baiyin_df_modify,qianchuan_df_modify = main(live_room)
     merged_data = process_live_time(merged_data)
     merged_data = process_columns(merged_data)

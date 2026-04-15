@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(mysql:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git push:*)",
+      "Read(//d/python project/**)",
+      "Bash(dir \"D:\\\\python project\\\\直播间核心数据2026-04-14_鱼子酱.xlsx\")",
+      "Bash(ls -la \"d:\\\\python project\\\\python project\"/*.xlsx)"
     ],
     "deny": [],
     "ask": []
