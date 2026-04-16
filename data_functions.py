@@ -234,6 +234,8 @@ def san_dy_self_live_data(df):
     return df
 def convert_units(series):
     series = series.astype(str)
+    # 移除 ¥ 符号和逗号
+    series = series.str.replace(r'[¥,]', '', regex=True)
     mask = series.str.contains('万')
     series = series.str.replace('万', '', regex=False)
     series = pd.to_numeric(series, errors='coerce')

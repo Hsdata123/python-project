@@ -29,6 +29,110 @@ DB_CONFIG = {
     'charset': 'utf8mb4'
 }
 
+# 百应数据库配置
+BAIYIN_DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '123456',
+    'database': 'baiyin_data',
+    'charset': 'utf8mb4'
+}
+
+# 账号名称映射
+LIVE_ROOM_MAPPING_DOUDIAN = {
+    "鱼子酱": "弹动官方旗舰店",
+    "椰子": "弹动个人护理旗舰店"
+}
+
+def get_baiyin_basic_info_from_db(live_room):
+    """从百应数据库获取基本信息表"""
+    account_name = LIVE_ROOM_MAPPING_DOUDIAN.get(live_room)
+    if not account_name:
+        print(f"未知的直播间: {live_room}")
+        return pd.DataFrame()
+
+    connection = pymysql.connect(**BAIYIN_DB_CONFIG)
+    try:
+        query = f"SELECT * FROM basic_info WHERE `账号名称`='{account_name}'"
+        # 使用 connection.execute 而不是 pd.read_sql，避免 pandas 警告
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+        df = pd.DataFrame(rows, columns=columns)
+        print(f"从数据库读取 basic_info，共 {len(df)} 行")
+
+        # 处理直播时间列，提取直播开始时间、直播结束时间、日期
+        if '直播时间' in df.columns:
+            def extract_start_time(time_str):
+                if pd.isna(time_str) or time_str == '':
+                    return None
+                match = re.search(r'(\d{4}-\d{2}-\d{2}[_ ]\d{2}-\d{2}-\d{2})~', str(time_str))
+                if match:
+                    return match.group(1).replace(' ', '_')
+                return None
+
+            def extract_end_time(time_str):
+                if pd.isna(time_str) or time_str == '':
+                    return None
+                match = re.search(r'~(\d{4}-\d{2}-\d{2}[_ ]\d{2}-\d{2}-\d{2})', str(time_str))
+                if match:
+                    return match.group(1).replace(' ', '_')
+                return None
+
+            def extract_date(start_time):
+                if pd.isna(start_time) or start_time == '':
+                    return None
+                return start_time[:10] if len(start_time) >= 10 else None
+
+            df['直播开始时间'] = df['直播时间'].apply(extract_start_time)
+            df['直播结束时间'] = df['直播时间'].apply(extract_end_time)
+            df['日期'] = df['直播开始时间'].apply(extract_date)
+
+        return df
+    finally:
+        connection.close()
+
+def get_baiyin_traffic_analysis_channel_from_db(live_room):
+    """从百应数据库获取流量分析-渠道分析表"""
+    account_name = LIVE_ROOM_MAPPING_DOUDIAN.get(live_room)
+    if not account_name:
+        print(f"未知的直播间: {live_room}")
+        return pd.DataFrame()
+
+    connection = pymysql.connect(**BAIYIN_DB_CONFIG)
+    try:
+        query = f"SELECT * FROM traffic_analysis_channel WHERE `账号名称`='{account_name}'"
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+        df = pd.DataFrame(rows, columns=columns)
+        print(f"从数据库读取 traffic_analysis_channel，共 {len(df)} 行")
+        return df
+    finally:
+        connection.close()
+
+def get_baiyin_traffic_conversion_funnel_from_db(live_room):
+    """从百应数据库获取流量&转化-转化漏斗表"""
+    account_name = LIVE_ROOM_MAPPING_DOUDIAN.get(live_room)
+    if not account_name:
+        print(f"未知的直播间: {live_room}")
+        return pd.DataFrame()
+
+    connection = pymysql.connect(**BAIYIN_DB_CONFIG)
+    try:
+        query = f"SELECT * FROM traffic_conversion_funnel WHERE `账号名称`='{account_name}'"
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+        df = pd.DataFrame(rows, columns=columns)
+        print(f"从数据库读取 traffic_conversion_funnel，共 {len(df)} 行")
+        return df
+    finally:
+        connection.close()
+
 def get_qianchuan_from_db(live_room):
     live_dict = {
         "鱼子酱":"弹动官方旗舰店",
@@ -169,10 +273,15 @@ def return_column_rate(df,df_rate,df_son,df_prents):
     """
     安全计算占比
     """
-    df[df_rate] = df.swifter.apply(lambda row: 
-                row[df_son] / row[df_prents] 
-                if row[df_prents] != 0 else 0, 
-                axis=1)
+    def safe_divide(row):
+        try:
+            son = float(row[df_son]) if pd.notna(row[df_son]) else 0
+            parents = float(row[df_prents]) if pd.notna(row[df_prents]) else 0
+            return son / parents if parents != 0 else 0
+        except (ValueError, TypeError):
+            return 0
+
+    df[df_rate] = df.apply(safe_divide, axis=1)
     return df
 
 
@@ -411,38 +520,70 @@ if __name__ == "__main__":
             qianchuan["直播间"] = name_dict["name"]
             qianchuan_data = pd.concat([qianchuan_data,qianchuan])
 
-            ###全域流量
-            latest_file = get_latest_file(name_dict["live_room"])
-            quanyu = pd.read_excel(latest_file,sheet_name="流量分析-渠道分析")
-            quanyu_tran_data = pd.read_excel(latest_file,sheet_name="流量&转化-转化漏斗")[['直播开始时间','日期','直播间曝光_观看率人数','直播间观看人数','直播间观看_商品曝光率人数'
-                                                                                   ,'直播间曝光_成交转化率人数','直播间商品曝光_点击率人数','直播间商品点击_成交转化率人数','直播间观看_成交转化率人数','平均在线人数'
-                                                                                   ,'直播间曝光人数','商品曝光人数','商品点击人数','成交人数']]
+            ###全域流量 - 从数据库读取
+            quanyu = get_baiyin_traffic_analysis_channel_from_db(name_dict["live_room"])
+            quanyu_basic_data = get_baiyin_basic_info_from_db(name_dict["live_room"])
+            quanyu_tran_data = get_baiyin_traffic_conversion_funnel_from_db(name_dict["live_room"])
 
-            quanyu_basic_data = pd.read_excel(latest_file,sheet_name="基本信息")[['直播开始时间','日期',"直播结束时间",'千次观看成交金额']]
+            # 从 basic_info 创建 直播结束时间 -> 直播开始时间 和 直播结束时间 -> 日期 的映射
+            end_time_to_start_time = {}
+            end_time_to_date = {}
+            if not quanyu_basic_data.empty and '直播结束时间' in quanyu_basic_data.columns:
+                for _, row in quanyu_basic_data.iterrows():
+                    if pd.notna(row.get('直播结束时间')) and pd.notna(row.get('直播开始时间')):
+                        end_time_to_start_time[row['直播结束时间']] = row['直播开始时间']
+                        end_time_to_date[row['直播结束时间']] = row['日期']
 
-            quanyu_live = quanyu_tran_data.merge(quanyu_basic_data,on=['直播开始时间','日期'])
+            # 标准化时间格式（将空格转换为下划线）
+            def standardize_time_format(time_str):
+                if pd.isna(time_str) or time_str == '':
+                    return None
+                return str(time_str).replace(' ', '_')
+
+            # 为 quanyu_tran_data 添加直播开始时间和日期（通过直播结束时间映射）
+            if not quanyu_tran_data.empty and '直播结束时间' in quanyu_tran_data.columns:
+                quanyu_tran_data['标准化结束时间'] = quanyu_tran_data['直播结束时间'].apply(standardize_time_format)
+                quanyu_tran_data['直播开始时间'] = quanyu_tran_data['标准化结束时间'].map(end_time_to_start_time)
+                quanyu_tran_data['日期'] = quanyu_tran_data['标准化结束时间'].map(end_time_to_date)
+                quanyu_tran_data['直播结束时间'] = quanyu_tran_data['标准化结束时间']
+                quanyu_tran_data.drop('标准化结束时间', axis=1, inplace=True)
+
+            # 为 quanyu 添加直播开始时间和日期
+            if not quanyu.empty and '直播结束时间' in quanyu.columns:
+                quanyu['标准化结束时间'] = quanyu['直播结束时间'].apply(standardize_time_format)
+                quanyu['直播开始时间'] = quanyu['标准化结束时间'].map(end_time_to_start_time)
+                quanyu['日期'] = quanyu['标准化结束时间'].map(end_time_to_date)
+                quanyu['直播结束时间'] = quanyu['标准化结束时间']
+                quanyu.drop('标准化结束时间', axis=1, inplace=True)
+
+            # quanyu_basic_data 需要保留的字段
+            if not quanyu_basic_data.empty:
+                quanyu_basic_data = quanyu_basic_data[['直播开始时间', '日期', '直播结束时间', '千次观看成交金额']]
+
+            # quanyu_tran_data 需要保留的字段（数据库列名可能使用下划线格式）
+            if not quanyu_tran_data.empty:
+                tran_cols = ['直播开始时间', '日期', '直播间曝光_观看率人数', '直播间观看人数', '直播间观看_商品曝光率人数',
+                             '直播间曝光_成交转化率人数', '直播间商品曝光_点击率人数', '直播间商品点击_成交转化率人数',
+                             '直播间观看_成交转化率人数', '平均在线人数', '直播间曝光人数', '商品曝光人数', '商品点击人数', '成交人数']
+                # 只保留存在的列
+                existing_cols = [col for col in tran_cols if col in quanyu_tran_data.columns]
+                quanyu_tran_data = quanyu_tran_data[existing_cols]
+
+            quanyu_live = quanyu_tran_data.merge(quanyu_basic_data, on=['直播开始时间', '日期'])
             quanyu_live["直播间"] = name_dict["name"]
-            quanyu_live_data = pd.concat([quanyu_live_data,quanyu_live])
+            quanyu_live_data = pd.concat([quanyu_live_data, quanyu_live])
 
             quanyu_analysis = calculate_all_metrics(quanyu)
             quanyu_analysis["直播间"] = name_dict["name"]
-            quanyu_analysis_data = pd.concat([quanyu_analysis_data,quanyu_analysis])
+            quanyu_analysis_data = pd.concat([quanyu_analysis_data, quanyu_analysis])
         else:
             print(f"跳过 {name_dict['name']} 的后续处理（baiyin为空）")
             continue
-    print(f"\n===== quanyu_live_data 汇总 =====")
-    print(f"quanyu_live_data 行数: {len(quanyu_live_data)}")
-    print(f"quanyu_live_data 直播间列表: {quanyu_live_data['直播间'].unique().tolist()}")
-    print(f"quanyu_live_data 日期范围: {quanyu_live_data['日期'].min()} ~ {quanyu_live_data['日期'].max()}")
 
     live_time_day_time = quanyu_live_data[['直播开始时间','日期',"直播结束时间","直播间"]].copy()
     live_time_day_time_new = pd.DataFrame([record for _, row in live_time_day_time.iterrows() for record in expand_hours(row)])
     live_time_day_time_new["小时"] = live_time_day_time_new['小时'].astype('int')
-    print(f"\n===== live_time_day_time_new 展开后 =====")
-    print(f"live_time_day_time_new 行数: {len(live_time_day_time_new)}")
-    print(f"直播间列表: {live_time_day_time_new['直播间'].unique().tolist()}")
-    print(f"日期列表: {live_time_day_time_new['日期'].unique().tolist()}")
-    print(f"\n各直播间日期范围:")
+
     for room in live_time_day_time_new['直播间'].unique():
         room_data = live_time_day_time_new[live_time_day_time_new['直播间'] == room]
         print(f"  {room}: {room_data['日期'].min()} ~ {room_data['日期'].max()}")
@@ -458,9 +599,9 @@ if __name__ == "__main__":
     live_time_gmv,baiyin_modify_data = qianchuan_group_merge(qianchuan_data,live_time_day_time_new,baiyin_data)
 
     quanyu_live_data = quanyu_live_data.merge(live_time_gmv,on=['直播间',"直播开始时间"])
-    
+
     return_column_rate(quanyu_live_data,'UV价值','整体成交金额','直播间观看人数')
-    
+
     avg_live_online_count = quanyu_analysis_data[quanyu_analysis_data["渠道名称"]=="整体"][["直播开始时间","直播间","人均观看时长"]]
 
     quanyu_live_data = quanyu_live_data.merge(avg_live_online_count,on=["直播开始时间","直播间"]).merge(baiyin_modify_data,on=["直播开始时间","直播间"])
