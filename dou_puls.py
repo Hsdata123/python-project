@@ -46,6 +46,46 @@ def get_baiyin_traffic_from_db(live_room):
     finally:
         connection.close()
 
+def get_live_room_data_from_db(live_room):
+    """
+    从百应数据库获取直播间整场数据，替代文件读取
+
+    Args:
+        live_room: 直播间名称（鱼子酱/椰子）
+
+    Returns:
+        merged_data: 包含所有sheet数据的字典，与原process_excel_files返回结构一致
+    """
+    account_name = LIVE_ROOM_MAPPING.get(live_room)
+    if not account_name:
+        print(f"未知的直播间: {live_room}")
+        return {}
+
+    connection = pymysql.connect(**BAIYIN_DB_CONFIG)
+    try:
+        # 定义表名与sheet名称的映射
+        table_mapping = {
+            '基本信息': 'basic_info',
+            '流量&转化-转化漏斗': 'traffic_conversion_funnel',
+            '流量分析-渠道分析': 'traffic_analysis_channel',
+            '流量&转化-短视频引流': 'traffic_short_video',
+            '互动&人群&售后': 'interaction_after_sale',
+            '直播间总体数据': 'live_room_summary',
+            '商品数据': 'product_data',
+            'SKU数据': 'sku_data'
+        }
+
+        merged_data = {}
+        for sheet_name, table_name in table_mapping.items():
+            query = f"SELECT * FROM {table_name} WHERE `账号名称`='{account_name}'"
+            df = pd.read_sql(query, connection)
+            merged_data[sheet_name] = df
+            print(f"从数据库读取 '{sheet_name}'，共 {len(df)} 行")
+
+        return merged_data
+    finally:
+        connection.close()
+
 def get_qianchuan_from_db(live_room):
     """从数据库获取千川数据"""
     connection = pymysql.connect(**DB_CONFIG)
@@ -226,17 +266,20 @@ def  process_live_time(data_dict):
             if '直播结束时间' in df.columns:
                 print(f"处理sheet: {sheet_name}")
                 print(f"原始数据中的结束时间: {df['直播结束时间'].tolist()[:5]}")  # 只显示前5个
-                
+
                 # 标准化其他sheet中的结束时间格式
                 df['标准化结束时间'] = df['直播结束时间'].apply(standardize_time_format)
-                
+
+                # 更新直播结束时间为标准化后的格式（保持下划线格式与其他表一致）
+                df['直播结束时间'] = df['标准化结束时间']
+
                 # 为每个sheet添加直播开始时间和日期字段
                 df['直播开始时间'] = df['标准化结束时间'].map(end_time_to_start_time)
                 df['日期'] = df['标准化结束时间'].map(end_time_to_date)
-                
+
                 # 移除临时列
                 df.drop('标准化结束时间', axis=1, inplace=True)
-                
+
                 print(f"匹配后的开始时间: {df['直播开始时间'].tolist()[:5]}")
                 print(f"匹配后的日期: {df['日期'].tolist()[:5]}")
                 print(f"成功匹配数量: {df['直播开始时间'].notna().sum()}/{len(df)}")
@@ -551,14 +594,26 @@ def merge_data_to_df(merged_data):
 def live_room_okr_data(merged_data):
     df = pd.DataFrame()
     df = merged_data["基本信息"][["日期","直播结束时间",'直播开始时间','千次观看成交金额']]
-    df["直播结束时间"] = df["直播结束时间"].apply(lambda x:x.replace("_"," "))
+    # 注意：merged_data 中的时间格式已经是下划线格式，不需要转换
+    # df["直播结束时间"] = df["直播结束时间"].apply(lambda x:x.replace("_"," "))  # 已移除，因为 process_live_time 已标准化格式
+
+    # 转换千次观看成交金额为数值类型
+    df['千次观看成交金额'] = df['千次观看成交金额'].astype(str).str.replace(r'[¥,，]', '', regex=True).replace(['nan', ''], '0').astype(float)
+
     df["直播场次计数"] = 1
+
+    print("调试 live_room_okr_data: 基本信息 df shape:", df.shape)
+    print("调试: 基本信息 直播结束时间 sample:", df["直播结束时间"].head(3).tolist())
+    print("调试: 基本信息 直播开始时间 sample:", df["直播开始时间"].head(3).tolist())
     
     
     
     df = day_of_week_chinese(df)
     
     df = df.merge(merged_data["流量分析-渠道分析"][merged_data["流量分析-渠道分析"]["渠道名称"]=="整体"][["直播结束时间",'直播开始时间',"千川消耗","人均观看时长","观看次数"]],on=["直播结束时间",'直播开始时间'])
+    print("调试: 第一次merge后 df shape:", df.shape)
+    print("调试: 流量分析-渠道分析 直播结束时间 sample:", merged_data["流量分析-渠道分析"]["直播结束时间"].head(3).tolist())
+    print("调试: 流量分析-渠道分析 直播开始时间 sample:", merged_data["流量分析-渠道分析"]["直播开始时间"].head(3).tolist())
     df["人均观看时长"] = df["人均观看时长"].replace(['nan',''],0).astype(float)
 
     df['观看次数'] = df['观看次数'].apply(lambda x: float(x.replace('万', '')) * 10000 if '万' in str(x) else float(x))
@@ -566,12 +621,23 @@ def live_room_okr_data(merged_data):
     
     df = df.merge(merged_data["流量&转化-转化漏斗"][["直播结束时间",'直播开始时间',"自然流量观看人数","付费流量观看人数",
                                             "平均在线人数","直播间曝光人数","直播间观看人数","直播间曝光次数","商品曝光人数","商品点击人数","成交人数"]],on=["直播结束时间",'直播开始时间'])
-    df[["自然流量观看人数","付费流量观看人数"]] = df[["自然流量观看人数","付费流量观看人数"]].replace(["-",''],0)
-    df[["自然流量观看人数","付费流量观看人数"]] = df[["自然流量观看人数","付费流量观看人数"]].astype("float")
-    df["观看总时长"] = df.apply(lambda row: 
-                    row["直播间观看人数"] * row["人均观看时长"], 
+
+    # 确保所有数值列都转换为 float 类型
+    numeric_cols_from_funnel = ["自然流量观看人数","付费流量观看人数","平均在线人数","直播间曝光人数",
+                                "直播间观看人数","直播间曝光次数","商品曝光人数","商品点击人数","成交人数"]
+    for col in numeric_cols_from_funnel:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(r'[¥,，\-]', '', regex=True).replace(['nan', ''], '0').astype(float)
+
+    df["观看总时长"] = df.apply(lambda row:
+                    row["直播间观看人数"] * row["人均观看时长"],
                     axis=1)
-    df = df.merge(merged_data["互动&人群&售后"][["直播结束时间",'直播开始时间',"退款人数","新增粉丝数"]],on=["直播结束时间",'直播开始时间'])    
+    df = df.merge(merged_data["互动&人群&售后"][["直播结束时间",'直播开始时间',"退款人数","新增粉丝数"]],on=["直播结束时间",'直播开始时间'])
+
+    # 确保互动售后表中的数值列也转换为 float
+    for col in ["退款人数", "新增粉丝数"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(r'[¥,，\-]', '', regex=True).replace(['nan', ''], '0').astype(float)
 
     target_columns = ["平均在线人数","直播间观看人数","直播间曝光人数","商品曝光人数","自然流量观看人数","付费流量观看人数","观看次数",
                             "直播间曝光次数","商品点击人数","成交人数","千次观看成交金额",
@@ -600,7 +666,7 @@ def live_room_okr_data(merged_data):
                     if row["直播间曝光人数"] != 0 else 0, 
                     axis=1)
     df_product =  merged_data["基本信息"][["日期",'直播开始时间',"直播结束时间"]]
-    df_product["直播结束时间"] = df_product["直播结束时间"].apply(lambda x:x.replace("_"," "))
+    # 注意：merged_data 中的时间格式已经是下划线格式，不需要转换
     df_product = df_product.merge(merged_data["商品数据"][["直播结束时间",'直播开始时间',"成交订单数"]],on=["直播结束时间","直播开始时间"])
     df_product["成交订单数"] = df_product["成交订单数"].replace(['nan',''],0).astype("float")
     df_product = df_product.groupby(["日期",'直播开始时间',"直播结束时间"])["成交订单数"].sum(numeric_only=True).reset_index()
@@ -662,14 +728,22 @@ def process_columns(merged_data):
                     .astype(float)
                 )
                 
-            elif '金额' in col or '笔单价' in col or '消耗' in col:
-                # 处理金额列
-                df_processed.loc[:, col] = (
-                    df_processed[col].astype(str)
-                    .str.replace(r'[¥,]', '', regex=True)
-                    .replace(['nan', ''], '0')
-                    .astype(float)
-                )
+            elif '金额' in col or '笔单价' in col or '消耗' in col or '人数' in col or '次数' in col or '件数' in col or '订单数' in col:
+                # 处理数值列（金额、人数、次数、件数、订单数等）
+                def convert_value(x):
+                    if pd.isna(x) or str(x) in ['nan', '', '-']:
+                        return 0.0
+                    x_str = str(x)
+                    has_wan = '万' in x_str
+                    x_clean = x_str.replace('¥', '').replace(',', '，').replace('万', '')
+                    try:
+                        result = float(x_clean)
+                        if has_wan:
+                            result = result * 10000
+                        return result
+                    except:
+                        return 0.0
+                df_processed.loc[:, col] = df_processed[col].apply(convert_value)
             elif '人均观看时长' in col:
                 # 调用转换函数
                 df_processed.loc[:, col] = df_processed[col].apply(time_to_seconds)
@@ -680,6 +754,10 @@ def qianchuan_baiyin_group_merge(qianchuan,baiyin,live_time_day_time):
     # 去除重复列，避免 df[col] 返回 DataFrame 而非 Series
     qianchuan = qianchuan.loc[:, ~qianchuan.columns.duplicated()]
     live_time_day_time = live_time_day_time.loc[:, ~live_time_day_time.columns.duplicated()]
+
+    print("调试: qianchuan 列名:", qianchuan.columns.tolist() if not qianchuan.empty else "empty")
+    print("调试: live_time_day_time 列名:", live_time_day_time.columns.tolist() if not live_time_day_time.empty else "empty")
+    print("调试: qianchuan 日期-小时 示例:", qianchuan['日期-小时'].head().tolist() if '日期-小时' in qianchuan.columns and not qianchuan.empty else "无日期-小时列")
 
     print("调试: qianchuan 日期-小时 示例:", qianchuan['日期-小时'].head().tolist() if '日期-小时' in qianchuan.columns and not qianchuan.empty else "无")
     print("调试: live_time_day_time 日期-小时 示例:", live_time_day_time['日期-小时'].head().tolist() if '日期-小时' in live_time_day_time.columns and not live_time_day_time.empty else "无")
@@ -735,9 +813,10 @@ def main(live_room):
         return
     
     # 处理文件
-    print("开始处理文件...")
-    #TODO 将merged_data 数据源替换成数据库，具体详见目的：直播间整场数据的数据来源由文件替换到对应的数据库中的数据表。.md
-    merged_data = process_excel_files(folder_path)
+    print("开始从数据库读取数据...")
+    # TODO 将merged_data 数据源替换成数据库，具体详见目的：直播间整场数据的数据来源由文件替换到对应的数据库中的数据表。.md
+    # 原有文件处理逻辑 process_excel_files 保留在第395行，后续脚本可能仍需使用
+    merged_data = get_live_room_data_from_db(live_room)
     baiyin_df_modify,qianchuan_df_modify = merge_baiyin_qianchuan_data(live_room)
     # qianchuan_group(qianchuan_df_modify)
     if not merged_data:
@@ -1200,12 +1279,24 @@ if __name__ == "__main__":
 
     live_room_okr_df["日期"] = pd.to_datetime(live_room_okr_df["日期"])
     live_room_okr_df.drop(columns="新增粉丝数",inplace=True)
-    
+
+    print("调试: live_room_okr_df shape:", live_room_okr_df.shape)
+    print("调试: live_room_okr_df columns:", live_room_okr_df.columns.tolist())
+    print("调试: live_room_okr_df sample:", live_room_okr_df.head(3).to_dict() if not live_room_okr_df.empty else "empty")
+
     live_time_day_time = live_room_okr_df[["日期","直播开始时间","直播结束时间"]]
+    print("调试: live_time_day_time shape:", live_time_day_time.shape)
+    print("调试: live_time_day_time sample:", live_time_day_time.head(3).to_dict() if not live_time_day_time.empty else "empty")
+
     live_time_day_time_new = pd.DataFrame([record for _, row in live_time_day_time.iterrows() for record in expand_hours(row)])
+    print("调试: expand_hours 返回记录数:", len(live_time_day_time_new))
     live_time_day_time_new.to_excel("live_time_day_time_new.xlsx",index=False)
 
     baiyin,qianchuan = qianchuan_baiyin_group_merge(qianchuan_df_modify,baiyin_df_modify,live_time_day_time_new)
+    print("调试: qianchuan_df_modify 列名:", qianchuan_df_modify.columns.tolist() if not qianchuan_df_modify.empty else "empty")
+    print("调试: baiyin_df_modify 列名:", baiyin_df_modify.columns.tolist() if not baiyin_df_modify.empty else "empty")
+    print("调试: live_time_day_time_new 列名:", live_time_day_time_new.columns.tolist() if not live_time_day_time_new.empty else "empty")
+    print("调试: live_time_day_time_new 日期-小时 示例:", live_time_day_time_new['日期-小时'].head().tolist() if '日期-小时' in live_time_day_time_new.columns and not live_time_day_time_new.empty else "无日期-小时列")
     print("调试: 合并后 qianchuan 行数:", len(qianchuan))
     print("调试: 合并后 baiyin 行数:", len(baiyin))
     baiyin.to_excel("mergebaiyin.xlsx",index=False)

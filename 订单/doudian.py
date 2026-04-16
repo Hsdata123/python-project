@@ -364,9 +364,15 @@ def liuliang_data(quanyu_analysis_data):
     df['直播开始时间'] = df['直播开始时间'].str.replace('_', ' ')
     df['直播结束时间'] = df['直播结束时间'].str.replace(' ', ' ')
 
+    # 统一时间格式：下划线->空格，连字符(时分秒)->冒号
+    for col in ['直播开始时间', '直播结束时间']:
+        df[col] = df[col].astype(str).str.replace('_', ' ', regex=False)
+        # 处理 2025-09-02 05-59-31 -> 2025-09-02 05:59:31
+        df[col] = df[col].str.replace(r'(\d{2})-(\d{2})-(\d{2})$', r'\1:\2:\3', regex=True)
+
     # 将时间字符串转换为datetime格式
-    df['直播开始时间'] = pd.to_datetime(df['直播开始时间'], format='%Y-%m-%d %H-%M-%S')
-    df['直播结束时间'] = pd.to_datetime(df['直播结束时间'], format='%Y-%m-%d %H-%M-%S')
+    df['直播开始时间'] = pd.to_datetime(df['直播开始时间'], format='mixed')
+    df['直播结束时间'] = pd.to_datetime(df['直播结束时间'], format='mixed')
 
     # 计算直播时长（小时）
     df['直播时长_小时'] = (df['直播结束时间'] - df['直播开始时间']).dt.total_seconds() / 3600
@@ -384,8 +390,8 @@ if __name__ == "__main__":
     quanyu_live_data = pd.DataFrame()
     # name_list = [{"name":"弹动官方旗舰店","data":"2025年订单.csv","live_room":"鱼子酱"}]  
 
-    name_list = [{"name":"弹动官方旗舰店","data":"1776221819_786428ec5fc38c498521156cd46fec7acSqUBCXQ.csv","live_room":"鱼子酱"}
-                 ,{"name":"弹动个护旗舰店","data":"1776222499_5129434345c2d8289f5d0a8fea1bb9daNzkMwoHT.csv","live_room":"椰子"}]
+    name_list = [{"name":"弹动官方旗舰店","data":"1776306488_4613b453283c07857d657c7b0daf8c74cSqUBCXQ.csv","live_room":"鱼子酱"}
+                 ,{"name":"弹动个护旗舰店","data":"1776307493_e2cbff80512774b1c648b3e4094ef8aaNzkMwoHT.csv","live_room":"椰子"}]
     for name_dict in name_list:
         file_name = os.path.join(file_path,name_dict["data"])
         df = pd.read_csv(file_name) 
@@ -408,8 +414,8 @@ if __name__ == "__main__":
             ###全域流量
             latest_file = get_latest_file(name_dict["live_room"])
             quanyu = pd.read_excel(latest_file,sheet_name="流量分析-渠道分析")
-            quanyu_tran_data = pd.read_excel(latest_file,sheet_name="流量&转化-转化漏斗")[['直播开始时间','日期','直播间曝光-观看率(人数)','直播间观看人数','直播间观看-商品曝光率(人数)'
-                                                                                   ,'直播间曝光-成交转化率(人数)','直播间商品曝光-点击率(人数)','直播间商品点击-成交转化率(人数)','直播间观看-成交转化率(人数)','平均在线人数'
+            quanyu_tran_data = pd.read_excel(latest_file,sheet_name="流量&转化-转化漏斗")[['直播开始时间','日期','直播间曝光_观看率人数','直播间观看人数','直播间观看_商品曝光率人数'
+                                                                                   ,'直播间曝光_成交转化率人数','直播间商品曝光_点击率人数','直播间商品点击_成交转化率人数','直播间观看_成交转化率人数','平均在线人数'
                                                                                    ,'直播间曝光人数','商品曝光人数','商品点击人数','成交人数']]
 
             quanyu_basic_data = pd.read_excel(latest_file,sheet_name="基本信息")[['直播开始时间','日期',"直播结束时间",'千次观看成交金额']]
@@ -459,8 +465,8 @@ if __name__ == "__main__":
 
     quanyu_live_data = quanyu_live_data.merge(avg_live_online_count,on=["直播开始时间","直播间"]).merge(baiyin_modify_data,on=["直播开始时间","直播间"])
 
-    quanyu_live_data = quanyu_live_data[['直播间','直播开始时间','日期','直播间曝光-观看率(人数)','直播间观看人数','直播间商品曝光-点击率(人数)'
-                                         ,'直播间商品点击-成交转化率(人数)','直播间观看-成交转化率(人数)'
+    quanyu_live_data = quanyu_live_data[['直播间','直播开始时间','日期','直播间曝光_观看率人数','直播间观看人数','直播间商品曝光_点击率人数'
+                                         ,'直播间商品点击_成交转化率人数','直播间观看_成交转化率人数'
                                          ,'平均在线人数','人均观看时长','新增粉丝数','评论次数','千次观看成交金额','UV价值','直播间曝光人数','商品曝光人数','商品点击人数','成交人数']]
     for col in data.columns:
         data[col] = data[col].swifter.apply(lambda x:x.replace("\t","") if isinstance(x, str) else x)
