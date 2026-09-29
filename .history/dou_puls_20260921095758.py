@@ -819,7 +819,14 @@ def qianchuan_baiyin_group_merge(qianchuan,baiyin,live_time_day_time):
 
 
 def main(live_room):
-
+    
+    # 设置文件夹路径
+    folder_path = os.path.join(r"D:\python project\python project", live_room)
+    
+    if not os.path.exists(folder_path):
+        print("文件夹路径不存在！")
+        return
+    
     # 处理文件
     print("开始从数据库读取数据...")
     # TODO 将merged_data 数据源替换成数据库，具体详见目的：直播间整场数据的数据来源由文件替换到对应的数据库中的数据表。.md

@@ -29,8 +29,7 @@ BAIYIN_DB_CONFIG = {
 LIVE_ROOM_MAPPING = {
     "鱼子酱": "弹动官方旗舰店",
     "椰子": "弹动个人护理旗舰店",
-    "人参": "弹动人参旗舰店",
-    "鱼子酱_临时":"弹动官方旗舰店_临时"
+    "人参": "弹动人参旗舰店"
 }
 
 def get_baiyin_traffic_from_db(live_room):
@@ -819,7 +818,14 @@ def qianchuan_baiyin_group_merge(qianchuan,baiyin,live_time_day_time):
 
 
 def main(live_room):
-
+    
+    # 设置文件夹路径
+    folder_path = os.path.join(r"D:\python project\python project", live_room)
+    
+    if not os.path.exists(folder_path):
+        print("文件夹路径不存在！")
+        return
+    
     # 处理文件
     print("开始从数据库读取数据...")
     # TODO 将merged_data 数据源替换成数据库，具体详见目的：直播间整场数据的数据来源由文件替换到对应的数据库中的数据表。.md
@@ -1272,7 +1278,7 @@ def add_period_ratio(df, period_column, ratio_suffix):
 
 # 修改主函数中的相关部分s
 if __name__ == "__main__":
-    live_room = "鱼子酱"
+    live_room = "人参"
     merged_data,baiyin_df_modify,qianchuan_df_modify = main(live_room)
     merged_data = process_live_time(merged_data)
     merged_data = process_columns(merged_data)

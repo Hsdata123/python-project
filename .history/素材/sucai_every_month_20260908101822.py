@@ -33,12 +33,12 @@ def get_material_data_from_db():
         connection.close()
 
 # 从数据库读取数据
-print("正在从数据库读取素材数据...")
-all_df = get_material_data_from_db()
-data_source = "db"
+# print("正在从数据库读取素材数据...")
+# all_df = get_material_data_from_db()
+# data_source = "db"
 
-# all_df =   pd.read_excel("D:/月度绩效/素材/消耗查询.xlsx")
-# data_source = "excel"
+all_df =   pd.read_excel("D:/月度绩效/素材/消耗查询 (2).xlsx")
+data_source = "excel"
 print(f"从数据库获取到 {len(all_df)} 条素材数据")
 print("素材名称" in all_df.columns)
 if "素材名称" in all_df.columns or "素材视频名称" in all_df.columns:

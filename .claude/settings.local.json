@@ -7,7 +7,10 @@
       "Bash(git push:*)",
       "Read(//d/python project/**)",
       "Bash(dir \"D:\\\\python project\\\\直播间核心数据2026-04-14_鱼子酱.xlsx\")",
-      "Bash(ls -la \"d:\\\\python project\\\\python project\"/*.xlsx)"
+      "Bash(ls -la \"d:\\\\python project\\\\python project\"/*.xlsx)",
+      "Bash(python -c ' *)",
+      "Bash(素材ID)",
+      "Bash(python -X utf8 -c ' *)"
     ],
     "deny": [],
     "ask": []

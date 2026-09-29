@@ -37,7 +37,7 @@ print("正在从数据库读取素材数据...")
 all_df = get_material_data_from_db()
 data_source = "db"
 
-# all_df =   pd.read_excel("D:/月度绩效/素材/消耗查询.xlsx")
+# all_df =   pd.read_excel("D:/月度绩效/素材/1-3月明细_合并.xlsx")
 # data_source = "excel"
 print(f"从数据库获取到 {len(all_df)} 条素材数据")
 print("素材名称" in all_df.columns)

@@ -499,7 +499,7 @@ if __name__ == "__main__":
     data = pd.DataFrame() 
     quanyu_analysis_data = pd.DataFrame()
     quanyu_live_data = pd.DataFrame()
-    # name_list = [{"name":"弹动官方旗舰店","data":"2026年上半年订单.csv","live_room":"鱼子酱"}]  
+    # name_list = [{"name":"弹动官方旗舰店","data":"2025年订单.csv","live_room":"鱼子酱"}]  
 
     name_list = [{"name":"弹动官方旗舰店","data":"1783907782_59c94e46a594d3d07034870a667f27accSqUBCXQ.csv","live_room":"鱼子酱"}
                  ,{"name":"弹动人参旗舰店","data":"人参.csv","live_room":"人参"}]
@@ -627,7 +627,7 @@ if __name__ == "__main__":
     print("订单提交时间:", data.count())
     data["周"] = calculate_week_excel_style_series(data["订单提交时间"])
     data["月"] = data["订单提交时间"].swifter.apply(lambda x:pd.to_datetime(x).month)
-    ##TODO 
+    ##TODO
     data["是否自播"] = np.where(
         ((data["达人昵称"] == "弹动官方旗舰店") | (data["达人昵称"] == "弹动个人护理旗舰店") | (data["达人昵称"] == "弹动控油小金瓶官方直播间")) & (data["流量体裁"] == "直播"),
         "自播",
@@ -657,8 +657,6 @@ if __name__ == "__main__":
         0
     )
     data = process_columns(data)
-
-    # data = data[data["是否自播"]=="自播"]
 
     data[['主订单编号','子订单编号','商品ID']] = data[['主订单编号','子订单编号','商品ID']].astype("str")
 

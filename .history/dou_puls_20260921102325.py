@@ -1272,7 +1272,7 @@ def add_period_ratio(df, period_column, ratio_suffix):
 
 # 修改主函数中的相关部分s
 if __name__ == "__main__":
-    live_room = "鱼子酱"
+    live_room = "人参"
     merged_data,baiyin_df_modify,qianchuan_df_modify = main(live_room)
     merged_data = process_live_time(merged_data)
     merged_data = process_columns(merged_data)

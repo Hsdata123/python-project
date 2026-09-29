@@ -7,7 +7,7 @@ from datetime import datetime,timedelta
 month_first = (datetime.now()-timedelta(days=1)).strftime("%Y-%m-01")
 yesterday = datetime.now()-timedelta(days=1)
 yesterday_str = yesterday.strftime("%Y-%m-%d")
-# month_first = '2026-05-01'
+# month_first = '2026-07-01'
 # yesterday_str = "2026-07-31"
 
 # 素材创建时间筛选起始日期（参数）
@@ -37,7 +37,7 @@ print("正在从数据库读取素材数据...")
 all_df = get_material_data_from_db()
 data_source = "db"
 
-# all_df =   pd.read_excel("D:/月度绩效/素材/消耗查询.xlsx")
+# all_df =   pd.read_excel("D:/月度绩效/素材/1-3月明细_合并.xlsx")
 # data_source = "excel"
 print(f"从数据库获取到 {len(all_df)} 条素材数据")
 print("素材名称" in all_df.columns)
@@ -46,21 +46,21 @@ if "素材名称" in all_df.columns or "素材视频名称" in all_df.columns:
 all_df["产品名称"] = get_product_name(all_df["全域素材视频名称"])
 
 # ========== 一次性修改：根据素材ID修改素材名称 ==========
-MANUAL_ID_NAME_MAP = {
-    "7673330686392877094": "人参-0813【A-种草-主页素材01】-J钰灵-B子鱼",
-    "7673455109986304043": "人参-0813【A-种草-主页素材02】-J钰灵-B子鱼",
-    "7673396118743629830": "人参-0813【A-种草-主页素材03】-J钰灵-B子鱼",
-}
-# 将素材ID转为字符串进行匹配
-all_df['素材ID'] = all_df['素材ID'].astype(str)
-for material_id, new_name in MANUAL_ID_NAME_MAP.items():
-    mask = all_df['素材ID'] == material_id
-    if mask.sum() > 0:
-        old_name = all_df.loc[mask, '全域素材视频名称'].values[0]
-        all_df.loc[mask, '全域素材视频名称'] = new_name
-        print(f"素材ID {material_id}: '{old_name}' -> '{new_name}'")
-    else:
-        print(f"素材ID {material_id} 未在数据中找到")
+# MANUAL_ID_NAME_MAP = {
+#     "7673330686392877094": "人参-0813【A-种草-主页素材01】-J钰灵-B子鱼",
+#     "7673455109986304043": "人参-0813【A-种草-主页素材02】-J钰灵-B子鱼",
+#     "7673396118743629830": "人参-0813【A-种草-主页素材03】-J钰灵-B子鱼",
+# }
+# # 将素材ID转为字符串进行匹配
+# all_df['素材ID'] = all_df['素材ID'].astype(str)
+# for material_id, new_name in MANUAL_ID_NAME_MAP.items():
+#     mask = all_df['素材ID'] == material_id
+#     if mask.sum() > 0:
+#         old_name = all_df.loc[mask, '全域素材视频名称'].values[0]
+#         all_df.loc[mask, '全域素材视频名称'] = new_name
+#         print(f"素材ID {material_id}: '{old_name}' -> '{new_name}'")
+#     else:
+#         print(f"素材ID {material_id} 未在数据中找到")
 # ========== 修改结束 ==========
  
 def change_wrong_name(video_name):

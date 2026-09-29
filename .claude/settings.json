@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python \"d:/python project/python project/check_columns.py\")",
+      "Bash(python \"d:/python project/python project/test_fix.py\")",
+      "Bash(python \"d:/python project/python project/debug_df_day.py\")",
+      "Bash(python \"d:/python project/python project/verify_fix.py\")",
+      "Bash(python \"d:/python project/python project/debug_df.py\")",
+      "Bash(python \"d:/python project/python project/test_fix2.py\")",
+      "Bash(python \"d:/python project/python project/test_fix3.py\")",
+      "Bash(python \"d:/python project/python project/debug_live_time.py\")",
+      "Bash(python \"d:/python project/python project/debug_expand.py\")",
+      "Read(//d/月度绩效/主播绩效/**)",
+      "Bash(python -c \"import pandas as pd; df = pd.read_excel\\('live_time_day_time_new.xlsx'\\); print\\(df['直播间'].unique\\(\\)\\); print\\('---'\\); print\\(df['日期'].max\\(\\)\\)\")",
+      "Bash(cd /d \"d:\\\\python project\\\\python project\\\\订单\")",
+      "Bash(python -c \"import pandas as pd; live = pd.read_excel\\('live_time_day_time_new.xlsx'\\); print\\('live columns:', live.columns.tolist\\(\\)\\); print\\('gehu dates:', live[live['直播间']=='弹动个护旗舰店']['日期'].min\\(\\), '~', live[live['直播间']=='弹动个护旗舰店']['日期'].max\\(\\)\\)\")",
+      "Bash(python -c \"import pandas as pd; live = pd.read_excel\\(r'd:\\\\\\\\python project\\\\\\\\python project\\\\\\\\订单\\\\\\\\live_time_day_time_new.xlsx'\\); print\\('live columns:', live.columns.tolist\\(\\)\\); print\\('gehu dates:', live[live['直播间']=='弹动个护旗舰店']['日期'].min\\(\\), '~', live[live['直播间']=='弹动个护旗舰店']['日期'].max\\(\\)\\)\")",
+      "Bash(python -c \"import pandas as pd; live = pd.read_excel\\('/d/python project/python project/live_time_day_time_new.xlsx'\\); print\\('live columns:', live.columns.tolist\\(\\)\\); print\\('gehu dates:', live[live['直播间']=='弹动个护旗舰店']['日期'].min\\(\\), '~', live[live['直播间']=='弹动个护旗舰店']['日期'].max\\(\\)\\)\")",
+      "Bash(mysql -u root -p123456 -e \"SELECT DATE_FORMAT\\(日期, '%Y-%m-%d'\\), COUNT\\(*\\) FROM qianchuan_sucai.t_sucai_daily_report GROUP BY DATE_FORMAT\\(日期, '%Y-%m-%d'\\) ORDER BY DATE_FORMAT\\(日期, '%Y-%m-%d'\\) DESC LIMIT 10;\")",
+      "Bash(mysql -u root -p123456 -e \"SELECT 日期, COUNT\\(*\\) FROM qianchuan_sucai.t_sucai_daily_report GROUP BY 日期 ORDER BY 日期 DESC LIMIT 10;\")",
+      "Bash(编导)",
+      "Bash(剪辑)",
+      "Bash(日期)",
+      "Bash(mysql -u root -p123456 -e \"SELECT `编导`, `剪辑`, COUNT\\(*\\) as cnt FROM qianchuan_sucai.t_sucai_daily_report WHERE `日期` = '2026-05-14' GROUP BY `编导`, `剪辑`;\")"
+    ]
+  }
+}
