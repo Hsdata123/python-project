@@ -393,18 +393,29 @@ def main():
     cur2 = conn.cursor()
     for dim_col, table in [("编导", "t_sucai_editor_daily_report"),
                            ("剪辑", "t_sucai_clipper_daily_report")]:
+        # 全量版
         g = df.groupby(["账号名称", dim_col, "日期"], as_index=False)[agg_cols].sum()
         g["数据截止日期"] = datetime.combine(end, datetime.min.time())
         gcols = ["账号名称", dim_col, "日期", "数据截止日期"] + agg_cols
         ph2 = ", ".join(["%s"] * len(gcols))
         col2 = ", ".join(f"`{c}`" for c in gcols)
-        uk = ", ".join(f"`{c}`" for c in ["账号名称", dim_col, "日期"])
         upd = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in gcols
                         if c not in ("账号名称", dim_col, "日期"))
         cur2.executemany(
             f"INSERT INTO {table} ({col2}) VALUES ({ph2}) ON DUPLICATE KEY UPDATE {upd}",
             [tuple(None if pd.isna(v) else v for v in r) for r in g[gcols].itertuples(index=False)])
         print(f"[写入] {table}: {len(g)} 行")
+
+        # _new 版（当月新素材：素材创建时间 >= 处理日期所在月 1 号）
+        month_first = end.replace(day=1)
+        df_new = df[pd.to_datetime(df["素材创建时间"], errors="coerce") >= pd.Timestamp(month_first)]
+        if not df_new.empty:
+            g_new = df_new.groupby(["账号名称", dim_col, "日期"], as_index=False)[agg_cols].sum()
+            g_new["数据截止日期"] = datetime.combine(end, datetime.min.time())
+            cur2.executemany(
+                f"INSERT INTO {table}_new ({col2}) VALUES ({ph2}) ON DUPLICATE KEY UPDATE {upd}",
+                [tuple(None if pd.isna(v) else v for v in r) for r in g_new[gcols].itertuples(index=False)])
+            print(f"[写入] {table}_new: {len(g_new)} 行")
     conn.commit()
     conn.close()
     print("[完成]")
