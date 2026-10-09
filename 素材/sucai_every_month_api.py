@@ -4,15 +4,26 @@
   读 qianchuan.qianchuan_overall_material_daily（乘方素材，type_v3=3 视频口径）
   → 名称/创建时间回填（t_material_data 历史映射）→ 打标（编导/剪辑/类型/需求/视角/
   命名标准/日爆款）→ 聚合
-  → 写 qianchuan_sucai 库 t_sucai_daily_report（UPSERT 键：素材ID+账号名称+日期）
+  → 写 qianchuan 库 t_sucai_daily_report（UPSERT 键：素材ID+账号名称+日期）
   + t_sucai_editor/clipper_daily_report（UPSERT 键：账号名称+编导/剪辑+日期）
+  → 推送飞书多维表格「新素材」数据表（一个需求两张视图）：
+    · 每日：昨日当月新素材消耗
+    · 月度绩效：当月创建的素材 × 当月1号~次月3号的消耗（按 归属月 分组即得）
+    行规则：统计日 D 归属当月窗口；D 为 1~3 号时额外归属上月窗口；
+            素材只进「素材创建月 == 归属窗口月」的行
+    幂等：记录键 = 账户ID_素材ID_归属月_日期，查重后 update/create，随3天回流窗口重推覆盖修订
+    同批行落库：qianchuan.t_sucai_new_material_daily（镜像表，PK：账户ID+素材ID+归属月+日期）
 
 与旧版 sucai_every_month.py 的差异：
 - 数据源：qianchuan 库乘方素材表（不再读 t_material_data）
 - 输出：不再写 Excel / t_sucai_monthly_report
-- 去掉：月爆款/新素材判定（依赖"日期=全部"行，DATE 列下不存在）
+- 去掉：月爆款判定（依赖"日期=全部"行，DATE 列下不存在）
 - 部署：Ubuntu，systemd timer 每日 07:00（素材端点 06:30/06:45 完成后）
 - 前置检查：昨日素材端点同步状态须 success 且行数>0，否则退出（防半截数据打标）
+
+飞书配置（.env，未配置则跳过推送）：
+    FEISHU_APP_ID / FEISHU_APP_SECRET          企业自建应用（需 bitable:app 权限）
+    FEISHU_BITABLE_APP_TOKEN / FEISHU_BITABLE_TABLE_ID   多维表格文档与数据表
 
 用法:
     python -X utf8 sucai_every_month_api.py                       # 处理昨日
@@ -20,11 +31,13 @@
 """
 import os
 import sys
-from datetime import date, datetime, timedelta
+import time
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
 import pymysql
+import requests
 
 # ---- 配置：环境变量优先（与 api_sync .env 同套机制），本机默认 localhost ----
 DB = dict(host=os.getenv("API_SYNC_DB_HOST", "localhost"),
@@ -40,6 +53,41 @@ SYNC_ACCOUNTS = ("1757724572785671", "1859998937306571", "1875393773286089")
 ACCOUNT_NAME = {"1757724572785671": "弹动官方旗舰店",
                 "1859998937306571": "弹动人参旗舰店",
                 "1875393773286089": "弹动人参旗舰店"}
+
+# ---- 飞书多维表格（新素材每日消耗 + 月度绩效窗口），未配置则跳过推送 ----
+FEISHU = dict(app_id=os.getenv("FEISHU_APP_ID", ""),
+              app_secret=os.getenv("FEISHU_APP_SECRET", ""),
+              app_token=os.getenv("FEISHU_BITABLE_APP_TOKEN", ""),
+              table_id=os.getenv("FEISHU_BITABLE_TABLE_ID", ""))
+FEISHU_API = "https://open.feishu.cn/open-apis"
+TZ8 = timezone(timedelta(hours=8))   # 飞书日期字段按北京时间转毫秒时间戳
+
+# 数据表字段：名称 → (类型码, 属性)；1=文本 2=数字 5=日期
+# （剪辑/日期/消耗 为用户已建字段，沿用命名；其余缺则自动建）
+FEISHU_FIELDS = [
+    ("记录键", 1, None),
+    ("归属月", 1, None),
+    ("日期", 5, {"date_formatter": "yyyy-MM-dd"}),
+    ("账号名称", 1, None),
+    ("素材ID", 1, None),
+    ("素材名称", 1, None),
+    ("素材创建时间", 5, {"date_formatter": "yyyy-MM-dd HH:mm"}),
+    ("编导", 1, None),
+    ("剪辑", 1, None),
+    ("剪辑名称", 1, None),
+    ("整体消耗", 2, None),
+    ("整体成交金额", 2, None),
+    ("整体成交订单数", 2, None),
+    ("整体展现次数", 2, None),
+    ("视频播放数", 2, None),
+]
+FEISHU_NUM_COLS = {"整体消耗": "整体消耗", "整体成交金额": "整体成交金额",
+                   "整体成交订单数": "整体成交订单数", "整体展现次数": "整体展现次数",
+                   "视频播放数": "视频播放数"}
+
+# 归属月黑名单：这些月的窗口行不产出不落库（2026-09 绩效已另结，用户要求飞书只保留 10 月起；
+# 手动回补跨到 10/1~3 时避免重推 9 月尾窗。要恢复某月把它从集合里删掉重跑即可）
+EXCLUDE_MONTHS = {"2026-09"}
 
 # ---- 乘方素材表列 → 中文列 ----
 COLUMN_MAP = {
@@ -270,27 +318,13 @@ def precheck(conn, d):
     return True, ""
 
 
-def load_history_maps(sc):
-    hcur.execute("""SELECT 素材ID, 全域素材视频名称, 日期 FROM qianchuan_sucai.t_material_data
-                   WHERE 全域素材视频名称 <> '' AND 全域素材视频名称 IS NOT NULL
-                   ORDER BY 素材ID, 日期 DESC""")
-    name_map = {}
-    for mid, nm, d in cur.fetchall():
-        name_map.setdefault(str(mid), nm)
-    cur.execute("""SELECT 素材ID, MAX(素材创建时间) FROM t_material_data
-                   WHERE 素材创建时间 REGEXP '^20[0-9]{2}-[0-9]{2}-[0-9]{2}'
-                   GROUP BY 素材ID""")
-    ct_map = {str(r[0]): r[1] for r in cur.fetchall()}
-    return name_map, ct_map
-
-
 def fetch_rows(conn, start, end):
     cur = conn.cursor()
     # API 列 AS 中文名：返回行直接以中文列为键
     pairs = sorted(COLUMN_MAP.items(), key=lambda kv: kv[0])
     dims = ["account_id", "stat_date", "material_id", "video_name", "video_type",
             "material_create_time_v2"]
-    sel_parts = [f"`{d_}`" for d_ in dims] +         [f"`{api}` AS `{cn}`" for api, cn in pairs]
+    sel_parts = [f"`{d_}`" for d_ in dims] + [f"`{api}` AS `{cn}`" for api, cn in pairs]
     col_sql = ", ".join(sel_parts)
     ids = ", ".join(f"'{a}'" for a in SYNC_ACCOUNTS)
     cur.execute(f"""SELECT {col_sql} FROM qianchuan_overall_material_daily
@@ -300,28 +334,174 @@ def fetch_rows(conn, start, end):
     return [dict(zip(names, r)) for r in cur.fetchall()]
 
 
-def build_df(rows, name_map, ct_map):
-    recs = []
+# ---- 飞书推送 ----
+
+def _fs_token():
+    """tenant_access_token（进程内缓存，2小时有效期内复用）"""
+    global _FS_TOKEN
+    if _FS_TOKEN:
+        return _FS_TOKEN
+    r = requests.post(f"{FEISHU_API}/auth/v3/tenant_access_token/internal",
+                      json={"app_id": FEISHU["app_id"],
+                            "app_secret": FEISHU["app_secret"]}, timeout=15).json()
+    if r.get("code") != 0:
+        raise RuntimeError(f"飞书 token 获取失败: {r.get('code')} {r.get('msg')}")
+    _FS_TOKEN = r["tenant_access_token"]
+    return _FS_TOKEN
+
+
+_FS_TOKEN = None
+
+
+def fs_call(method, path, body=None, params=None):
+    params = {k: v for k, v in (params or {}).items() if v}   # 空值参数不传（page_token="" 会校验失败）
+    r = requests.request(method, f"{FEISHU_API}{path}",
+                         headers={"Authorization": f"Bearer {_fs_token()}"},
+                         json=body, params=params, timeout=30)
+    data = r.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"飞书 API {path} 失败: {data.get('code')} {data.get('msg')}")
+    return data.get("data") or {}
+
+
+def fs_ensure_fields():
+    """确保数据表字段齐全（缺则建），并补两个视图"""
+    base = f"/bitable/v1/apps/{FEISHU['app_token']}/tables/{FEISHU['table_id']}"
+    have, page_token = set(), ""
+    while True:
+        d = fs_call("GET", f"{base}/fields",
+                    params={"page_size": 100, "page_token": page_token})
+        have |= {f["field_name"] for f in d.get("items") or []}
+        if not d.get("has_more"):
+            break
+        page_token = d["page_token"]
+    for name, ftype, prop in FEISHU_FIELDS:
+        if name not in have:
+            fs_call("POST", f"{base}/fields",
+                    body={"field_name": name, "type": ftype, "property": prop})
+            print(f"  [飞书] 新建字段 {name}")
+
+
+def _clipper_name(clipper, account_name):
+    """剪辑列剔除账号前缀与间隔符 → 纯人名（如 弹动人参旗舰店-B子鱼 → B子鱼）"""
+    s = "" if clipper is None or pd.isna(clipper) else str(clipper)
+    prefix = f"{account_name}-"
+    return s[len(prefix):] if account_name and s.startswith(prefix) else s
+
+
+def _to_ms(v):
+    """datetime/date → 北京时间毫秒时间戳（None/NaT → None）"""
+    if isinstance(v, (datetime, date)) and not pd.isna(v):
+        if not isinstance(v, datetime):
+            v = datetime(v.year, v.month, v.day)
+        return int(v.replace(tzinfo=TZ8).timestamp() * 1000)
+    return None
+
+
+def build_feishu_rows(df):
+    """生成推送行（原生类型，MySQL 镜像表与飞书共用；飞书格式在 push 段序列化）。
+    窗口规则：统计日 D 归属当月；D 为 1~3 号时额外归属上月；
+    素材只进「素材创建月 == 归属窗口月」的行——
+    9月绩效 = 创建时间在9月的素材 × 9/1~10/3 的消耗，10月同理延续到11/3。
+    """
+    ct = pd.to_datetime(df["素材创建时间"], errors="coerce")
+    out, skipped = [], 0
+    for i, row in df.iterrows():
+        d, c = row["日期"], ct.iloc[i]
+        if pd.isna(c):
+            skipped += 1
+            continue
+        prev = d.replace(day=1) - timedelta(days=1)
+        windows = [(d.year, d.month)] + ([(prev.year, prev.month)] if d.day <= 3 else [])
+        for y, m in windows:
+            if (c.year, c.month) != (y, m):
+                continue
+            ym = f"{y:04d}-{m:02d}"
+            if ym in EXCLUDE_MONTHS:
+                continue
+            rec = {
+                "account_id": str(row["account_id"]),
+                "素材ID": str(row["素材ID"]),
+                "归属月": ym,
+                "日期": d,
+                "账号名称": row.get("账号名称"),
+                "素材名称": row.get("全域素材视频名称"),
+                "素材创建时间": c.to_pydatetime(),
+                "编导": row.get("编导"),
+                "剪辑": row.get("剪辑"),
+                "剪辑名称": _clipper_name(row.get("剪辑"), row.get("账号名称")),
+            }
+            for col in FEISHU_NUM_COLS.values():
+                v = row.get(col)
+                rec[col] = None if v is None or pd.isna(v) else float(v)
+            out.append(rec)
+    return out, skipped
+
+
+def push_feishu(rows, skipped):
+    print(f"[飞书] 待推 {len(rows)} 行（创建时间为空跳过 {skipped} 行）")
+    if not rows:
+        return
+    fs_ensure_fields()
+    base = f"/bitable/v1/apps/{FEISHU['app_token']}/tables/{FEISHU['table_id']}"
+
+    # 原生类型 → 飞书格式（日期转毫秒时间戳；键含账户ID防同人参双账户折叠）
+    records = []
     for r in rows:
-        acct = ACCOUNT_NAME.get(r["account_id"], r["account_id"])
-        mid = str(r["material_id"])
-        rec = {
-            "素材ID": mid,
-            "账号名称": acct,
-            "日期": r["stat_date"],
-            "素材名称": r["video_name"] or name_map.get(mid, ""),
-            "素材创建时间": r["material_create_time_v2"],
-            "全域素材视频类型": r["video_type"] or "",
+        f = {
+            "记录键": f"{r['account_id']}_{r['素材ID']}_{r['归属月']}_{r['日期'].isoformat()}",
+            "归属月": r["归属月"],
+            "日期": _to_ms(r["日期"]),
+            "账号名称": r["账号名称"],
+            "素材ID": r["素材ID"],
+            "素材名称": r["素材名称"],
+            "素材创建时间": _to_ms(r["素材创建时间"]),
+            "编导": r["编导"],
+            "剪辑": r["剪辑"],
+            "剪辑名称": r["剪辑名称"],
         }
-        for cn in COLUMN_MAP.values():
-            rec[cn] = r.get(cn)
-        rec["视频完播数"] = (float(rec.get("视频播放数") or 0) *
-                             float(rec.get("视频完播率") or 0) / 100)
-        rec["10秒播放数"] = (float(rec.get("10秒播放率") or 0) *
-                              float(rec.get("视频播放数") or 0) / 100)
-        rec["素材数"] = 1
-        recs.append(rec)
-    return pd.DataFrame(recs)
+        for col in FEISHU_NUM_COLS.values():
+            f[col] = r.get(col)
+        records.append({"fields": f})
+
+    # 按记录键去重（同键保留最后一条）
+    by_key = {r["fields"]["记录键"]: r for r in records}
+    records = list(by_key.values())
+
+    # 查已存在记录 → record_id 映射。
+    # 飞书文本字段 is 筛选仅支持单值 → 按「归属月」逐值筛选分页拉取，
+    # 一次运行最多涉及 2 个月，扫描量恒定不随表增长。
+    key2rid = {}
+    for ym in sorted({r["fields"]["归属月"] for r in records}):
+        page_token = ""
+        while True:
+            d = fs_call("POST", f"{base}/records/search", body={
+                "field_names": ["记录键"],
+                "filter": {"conjunction": "and", "conditions": [
+                    {"field_name": "归属月", "operator": "is", "value": [ym]}]}},
+                params={"page_size": 500, "page_token": page_token})
+            for item in d.get("items") or []:
+                kv = (item.get("fields") or {}).get("记录键")
+                if isinstance(kv, list):   # 富文本形式兜底
+                    kv = "".join(seg.get("text", "") for seg in kv)
+                if kv:
+                    key2rid[kv] = item["record_id"]
+            if not d.get("has_more"):
+                break
+            page_token = d["page_token"]
+
+    to_create = [r for r in records if r["fields"]["记录键"] not in key2rid]
+    to_update = [{"record_id": key2rid[r["fields"]["记录键"]], "fields": r["fields"]}
+                 for r in records if r["fields"]["记录键"] in key2rid]
+    for i in range(0, len(to_create), 500):
+        fs_call("POST", f"{base}/records/batch_create",
+                body={"records": to_create[i:i + 500]})
+        time.sleep(0.3)
+    for i in range(0, len(to_update), 500):
+        fs_call("POST", f"{base}/records/batch_update",
+                body={"records": to_update[i:i + 500]})
+        time.sleep(0.3)
+    print(f"[飞书] 完成：新建 {len(to_create)} 行，更新 {len(to_update)} 行")
 
 
 def main():
@@ -366,6 +546,9 @@ def main():
     df["视频完播数"] = (df["视频播放数"].fillna(0) * df["视频完播率"].fillna(0) / 100).round()
     df["10秒播放数"] = (df["10秒播放率"].fillna(0) * df["视频播放数"].fillna(0) / 100).round()
 
+    # ---- 生成飞书推送行（键含 account_id，须在英文维度列 drop 之前）----
+    fs_rows, fs_skipped = build_feishu_rows(df)
+
     # ---- 写 t_sucai_daily_report（UPSERT 键：素材ID+账号名称+日期）----
     cur = sc.cursor()
     # 丢弃英文维度列（中文对应列已生成），避免混入 INSERT 列清单
@@ -406,8 +589,34 @@ def main():
             [tuple(None if pd.isna(v) else v for v in r) for r in g[gcols].itertuples(index=False)])
         print(f"[写入] {table}: {len(g)} 行")
 
+    # ---- 写 t_sucai_new_material_daily（飞书新素材表镜像，同事务）----
+    if fs_rows:
+        nm_cols = ["account_id", "素材ID", "归属月", "日期", "账号名称", "素材名称",
+                   "素材创建时间", "编导", "剪辑", "剪辑名称"] + list(FEISHU_NUM_COLS.values())
+        ph3 = ", ".join(["%s"] * len(nm_cols))
+        col3 = ", ".join(f"`{c}`" for c in nm_cols)
+        upd3 = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in nm_cols
+                         if c not in ("account_id", "素材ID", "归属月", "日期"))
+        cur3 = conn.cursor()
+        cur3.executemany(
+            f"INSERT INTO t_sucai_new_material_daily ({col3}) VALUES ({ph3}) "
+            f"ON DUPLICATE KEY UPDATE {upd3}",
+            [tuple(r.get(c) for c in nm_cols) for r in fs_rows])
+        print(f"[写入] t_sucai_new_material_daily: {len(fs_rows)} 行")
+
     conn.commit()
     conn.close()
+
+    # ---- 飞书推送（新素材：每日昨日消耗 + 月度绩效窗口）----
+    # 放在 MySQL 提交之后：飞书失败不影响入库，exit 1 留 journalctl 痕迹，手动重跑即可
+    if FEISHU["app_id"] and FEISHU["app_token"]:
+        try:
+            push_feishu(fs_rows, fs_skipped)
+        except Exception as e:
+            print(f"[飞书推送失败] {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("[飞书] 未配置 FEISHU_* 环境变量，跳过推送")
     print("[完成]")
 
 
