@@ -298,7 +298,9 @@ def parse_args():
     if "--end" in argv:
         end = date.fromisoformat(argv[argv.index("--end") + 1])
     if end is None:
-        end = date.today() - timedelta(days=1)
+        # Ubuntu 系统时区为 UTC，07:00 上海时间触发时 date.today() 仍是 UTC 前一天，
+        # 会导致窗口整体早一天（打标恒滞后同步水位一天），故按 +8 时区取"今天"
+        end = datetime.now(TZ8).date() - timedelta(days=1)
     if start is None:
         start = end - timedelta(days=2)
     return start, end
