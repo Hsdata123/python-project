@@ -164,3 +164,36 @@ def test_push_without_table_skips(fs_calls, monkeypatch):
     monkeypatch.setattr(r30, "ROLLING_TABLE_ID", "")
     r30.push_rolling([{"记录键": "k", "统计日": date(2026, 11, 4)}])
     assert fs_calls == []
+
+
+def test_run_rolling_compute_and_push(monkeypatch):
+    """两个统计日共享一次取数；dry_run 不触飞书。"""
+    calls = {"fetch": []}
+
+    def fake_fetch(conn, start, end):
+        calls["fetch"].append((start, end))
+        return [
+            row(OFFICIAL, "M1", date(2026, 11, 3), 100, datetime(2026, 11, 1, 9)),
+            row(OFFICIAL, "M1", date(2026, 11, 4), 50, datetime(2026, 11, 1, 9)),
+            row(RENSEN, "M2", date(2026, 11, 4), 70, datetime(2026, 10, 7, 9)),
+        ]
+
+    monkeypatch.setattr(r30, "fetch_rows", fake_fetch)
+    monkeypatch.setattr(rolling30, "from_who_video", lambda n, a: f"{a}-张三")
+    monkeypatch.setattr(rolling30, "fro_j_video", lambda n, a: f"{a}-李四")
+    pushed = []
+    monkeypatch.setattr(r30, "push_rolling", lambda recs: pushed.append(recs))
+    monkeypatch.setattr(r30, "ROLLING_TABLE_ID", "tblROLL")
+
+    days = [date(2026, 11, 3), date(2026, 11, 4)]
+    r30.run_rolling(conn=None, stat_dates=days)          # 真推送路径
+    assert calls["fetch"] == [(date(2026, 10, 5), date(2026, 11, 4))]  # 一次取数
+    assert len(pushed) == 1
+    keys = {r["记录键"] for r in pushed[0]}
+    assert f"2026-11-03_{OFFICIAL}_张三_李四" in keys
+    assert f"2026-11-04_{OFFICIAL}_张三_李四" in keys
+    assert f"2026-11-04_{RENSEN}_张三_李四" in keys
+
+    monkeypatch.setattr(r30, "push_rolling", lambda recs: (_ for _ in ()).throw(
+        AssertionError("dry-run 不应推送")))
+    r30.run_rolling(conn=None, stat_dates=days, dry_run=True)  # 不抛即通过

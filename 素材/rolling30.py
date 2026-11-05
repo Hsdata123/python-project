@@ -196,3 +196,24 @@ def push_rolling(records):
                 body={"records": to_update[i:i + 500]})
         time.sleep(0.3)
     print(f"[近30日] 完成：新建 {len(to_create)} 行，更新 {len(to_update)} 行")
+
+
+def run_rolling(conn, stat_dates, dry_run=False):
+    """编排：[min-29, max] 一次取数 → 逐统计日切片聚合 →（dry-run 打印 | 推送）。"""
+    if not stat_dates:
+        return
+    lo = min(stat_dates) - timedelta(days=WINDOW_DAYS - 1)
+    hi = max(stat_dates)
+    rows = fetch_rows(conn, lo, hi)
+    print(f"[近30日] 读取 {len(rows)} 行（{lo} ~ {hi}）")
+    df = prepare_rolling_df(rows)
+    records = []
+    for d in stat_dates:
+        sub = filter_cohort(df, d)
+        records.extend(build_rolling_records(aggregate_rolling(sub, d)))
+    if dry_run:
+        print(f"[近30日] dry-run 共 {len(records)} 行，示例：")
+        for r in records[:20]:
+            print("   ", r)
+        return
+    push_rolling(records)
