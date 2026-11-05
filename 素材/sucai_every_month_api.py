@@ -29,6 +29,8 @@
 用法:
     python -X utf8 sucai_every_month_api.py                       # 处理昨日
     python -X utf8 sucai_every_month_api.py --start 2026-09-01 --end 2026-09-29
+    python -X utf8 sucai_every_month_api.py --rolling-start 2026-08-01  # 近30日看板回补
+    python -X utf8 sucai_every_month_api.py --dry-run                   # 看板只算不推
 """
 import os
 import sys
@@ -295,19 +297,23 @@ def check_top_video(df):
 
 
 def parse_args():
-    start = end = None
+    start = end = rolling_start = None
+    dry_run = False
     argv = sys.argv[1:]
     if "--start" in argv:
         start = date.fromisoformat(argv[argv.index("--start") + 1])
     if "--end" in argv:
         end = date.fromisoformat(argv[argv.index("--end") + 1])
+    if "--rolling-start" in argv:
+        rolling_start = date.fromisoformat(argv[argv.index("--rolling-start") + 1])
+    dry_run = "--dry-run" in argv
     if end is None:
         # Ubuntu 系统时区为 UTC，07:00 上海时间触发时 date.today() 仍是 UTC 前一天，
         # 会导致窗口整体早一天（打标恒滞后同步水位一天），故按 +8 时区取"今天"
         end = datetime.now(TZ8).date() - timedelta(days=1)
     if start is None:
         start = end - timedelta(days=2)
-    return start, end
+    return start, end, rolling_start, dry_run
 
 
 def precheck(conn, d):
@@ -538,7 +544,7 @@ def push_feishu(rows, skipped):
 
 
 def main():
-    start, end = parse_args()
+    start, end, rolling_start, dry_run = parse_args()
     print(f"[run] {start} ~ {end}")
     conn = pymysql.connect(**DB, database=QC_DB)
     sc = conn
@@ -659,6 +665,20 @@ def main():
             sys.exit(1)
     else:
         print("[飞书] 未配置 FEISHU_* 环境变量，跳过推送")
+
+    # ---- 近30日新素材看板（滚动窗口；放在主推送之后：失败不影响月度主链路）----
+    try:
+        import rolling30
+        rolling30.ROLLING_TABLE_ID = os.getenv("FEISHU_BITABLE_ROLLING_TABLE_ID", "")
+        rolling_days = (rolling30.rolling_stat_dates(rolling_start, end)
+                        if rolling_start else [end])
+        run_conn = pymysql.connect(**DB, database=QC_DB)
+        try:
+            rolling30.run_rolling(run_conn, rolling_days, dry_run)
+        finally:
+            run_conn.close()
+    except Exception as e:
+        print(f"[近30日看板失败] {e}", file=sys.stderr)   # 只记日志，不中断退出码
     print("[完成]")
 
 

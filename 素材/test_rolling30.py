@@ -197,3 +197,15 @@ def test_run_rolling_compute_and_push(monkeypatch):
     monkeypatch.setattr(r30, "push_rolling", lambda recs: (_ for _ in ()).throw(
         AssertionError("dry-run 不应推送")))
     r30.run_rolling(conn=None, stat_dates=days, dry_run=True)  # 不抛即通过
+
+
+def test_parse_args_extended(monkeypatch):
+    import sucai_every_month_api as sm
+    argv = ["--rolling-start", "2026-08-01", "--dry-run"]
+    monkeypatch.setattr("sys.argv", ["sucai_every_month_api.py"] + argv)
+    start, end, rolling_start, dry_run = sm.parse_args()
+    assert rolling_start == date(2026, 8, 1) and dry_run is True
+    monkeypatch.setattr("sys.argv", ["sucai_every_month_api.py"])
+    start, end, rolling_start, dry_run = sm.parse_args()
+    assert rolling_start is None and dry_run is False
+    assert (end - start).days == 2          # 原默认窗口不变
