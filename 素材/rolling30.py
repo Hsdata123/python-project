@@ -158,7 +158,7 @@ def push_rolling(records):
                 "field_names": ["记录键"],
                 "filter": {"conjunction": "and", "conditions": [
                     {"field_name": "统计日", "operator": "is",
-                     "value": [_to_ms(d)]}]}},
+                     "value": [str(_to_ms(d))]}]}},   # API value schema 是字符串数组，整数会 1254018 InvalidFilter
                 params={"page_size": 500, "page_token": page_token})
             for item in resp.get("items") or []:
                 kv = (item.get("fields") or {}).get("记录键")
