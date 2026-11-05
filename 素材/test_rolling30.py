@@ -76,7 +76,7 @@ def test_aggregate_grouping(parsed_rows):
     key_rensen = f"{STAT.isoformat()}_{RENSEN}_张三_李四"
     by_key = {r["记录键"]: r for r in agg.to_dict("records")}
     assert by_key[key_official]["近30日素材数"] == 2
-    assert by_key[key_official]["近30日消耗"] == 300
+    assert by_key[key_official]["近30日消耗"] == 350   # M1 300 + M2 50
     assert by_key[key_rensen]["近30日素材数"] == 1
     assert by_key[key_rensen]["近30日消耗"] == 70
     assert set(agg["窗口起"]) == {WIN_START} and set(agg["窗口止"]) == {STAT}
