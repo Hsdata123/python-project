@@ -7,6 +7,7 @@
 - 行 = 统计日 × 账户 × 编导×剪辑组合；指标 = 素材数(nunique) + 窗口内消耗合计(整体消耗)
 - 推送：飞书同 base 新表（FEISHU_BITABLE_ROLLING_TABLE_ID），记录键幂等覆盖
 """
+import time
 from datetime import timedelta
 
 import pandas as pd
@@ -112,3 +113,86 @@ def build_rolling_records(agg):
             "近30日消耗": float(r["近30日消耗"]),
         })
     return out
+
+
+def _rolling_base():
+    return f"/bitable/v1/apps/{FEISHU['app_token']}/tables/{ROLLING_TABLE_ID}"
+
+
+def ensure_rolling_fields():
+    """确保「近30日新素材看板」表字段齐全（缺则建；表本身需在 base 中先建）。"""
+    base = _rolling_base()
+    have, page_token = set(), ""
+    while True:
+        d = fs_call("GET", f"{base}/fields",
+                    params={"page_size": 100, "page_token": page_token})
+        have |= {f["field_name"] for f in d.get("items") or []}
+        if not d.get("has_more"):
+            break
+        page_token = d["page_token"]
+    for name, ftype, prop in ROLLING_FIELDS:
+        if name not in have:
+            fs_call("POST", f"{base}/fields",
+                    body={"field_name": name, "type": ftype, "property": prop})
+            print(f"  [近30日] 新建字段 {name}")
+
+
+def push_rolling(records):
+    """记录键幂等推送：逐统计日 search（日期字段 is=毫秒时间戳）→ create/update。"""
+    if not ROLLING_TABLE_ID:
+        print("[近30日] 未配置 FEISHU_BITABLE_ROLLING_TABLE_ID，跳过推送")
+        return
+    print(f"[近30日] 待推 {len(records)} 行")
+    if not records:
+        return
+    by_key = {r["记录键"]: r for r in records}      # 同键保留最后一条
+    records = list(by_key.values())
+    ensure_rolling_fields()
+    base = _rolling_base()
+
+    key2rid = {}
+    for d in sorted({r["统计日"] for r in records}):
+        page_token = ""
+        while True:
+            resp = fs_call("POST", f"{base}/records/search", body={
+                "field_names": ["记录键"],
+                "filter": {"conjunction": "and", "conditions": [
+                    {"field_name": "统计日", "operator": "is",
+                     "value": [_to_ms(d)]}]}},
+                params={"page_size": 500, "page_token": page_token})
+            for item in resp.get("items") or []:
+                kv = (item.get("fields") or {}).get("记录键")
+                if isinstance(kv, list):
+                    kv = "".join(seg.get("text", "") for seg in kv)
+                if kv:
+                    key2rid[kv] = item["record_id"]
+            if not resp.get("has_more"):
+                break
+            page_token = resp.get("page_token") or ""
+
+    def feishu_fields(r):
+        return {
+            "记录键": r["记录键"],
+            "统计日": _to_ms(r["统计日"]),
+            "窗口起": _to_ms(r["窗口起"]),
+            "窗口止": _to_ms(r["窗口止"]),
+            "账号名称": r["账号名称"],
+            "编导名称": r["编导名称"],
+            "剪辑名称": r["剪辑名称"],
+            "近30日素材数": r["近30日素材数"],
+            "近30日消耗": r["近30日消耗"],
+        }
+
+    to_create = [{"fields": feishu_fields(r)}
+                 for k, r in by_key.items() if k not in key2rid]
+    to_update = [{"record_id": key2rid[k], "fields": feishu_fields(r)}
+                 for k, r in by_key.items() if k in key2rid]
+    for i in range(0, len(to_create), 500):
+        fs_call("POST", f"{base}/records/batch_create",
+                body={"records": to_create[i:i + 500]})
+        time.sleep(0.3)
+    for i in range(0, len(to_update), 500):
+        fs_call("POST", f"{base}/records/batch_update",
+                body={"records": to_update[i:i + 500]})
+        time.sleep(0.3)
+    print(f"[近30日] 完成：新建 {len(to_create)} 行，更新 {len(to_update)} 行")

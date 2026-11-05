@@ -99,6 +99,7 @@ def test_rolling_stat_dates():
     days = rolling_stat_dates(date(2026, 11, 2), date(2026, 11, 4))
     assert days == [date(2026, 11, 2), date(2026, 11, 3), date(2026, 11, 4)]
     assert rolling_stat_dates(date(2026, 11, 4), date(2026, 11, 4)) == [date(2026, 11, 4)]
+    assert rolling_stat_dates(date(2026, 11, 5), date(2026, 11, 4)) == []   # start>end → 空
 
 
 def test_build_records(parsed_rows):
@@ -113,3 +114,53 @@ def test_build_records(parsed_rows):
                       "编导名称", "剪辑名称", "近30日素材数", "近30日消耗"}
     keys = [r["记录键"] for r in recs]
     assert len(keys) == len(set(keys))      # 记录键唯一
+
+
+from datetime import datetime
+
+import rolling30 as r30
+from sucai_every_month_api import TZ8
+
+
+@pytest.fixture
+def fs_calls(monkeypatch):
+    """捕获 fs_call 调用；search 返回一条已存在记录用于触发 update 分支。"""
+    calls = []
+
+    def fake_fs_call(method, path, body=None, params=None):
+        calls.append((method, path, body, params))
+        if path.endswith("/records/search"):
+            return {"items": [{"record_id": "recEXIST",
+                               "fields": {"记录键": "2026-11-04_x_张三_李四"}}],
+                    "has_more": False}
+        return {}
+
+    monkeypatch.setattr(r30, "fs_call", fake_fs_call)
+    return calls
+
+
+def test_push_rolling_idempotent(fs_calls, monkeypatch):
+    monkeypatch.setattr(r30, "ROLLING_TABLE_ID", "tblROLL")
+    monkeypatch.setattr(r30, "FEISHU", {"app_token": "appX"})
+    recs = [{"记录键": "2026-11-04_x_张三_李四", "统计日": date(2026, 11, 4),
+             "窗口起": date(2026, 10, 6), "窗口止": date(2026, 11, 4),
+             "账号名称": "弹动官方旗舰店", "编导名称": "张三", "剪辑名称": "李四",
+             "近30日素材数": 2, "近30日消耗": 300.0}]
+    r30.push_rolling(recs)
+    methods = [(m, p) for m, p, *_ in fs_calls]
+    # 字段补建 + 逐统计日 search + 仅 update（记录键已存在）
+    assert any(p.endswith("/fields") and m == "POST" for m, p in methods)
+    searches = [b for m, p, b, _ in fs_calls if p.endswith("/records/search")]
+    assert searches and searches[0]["filter"]["conditions"][0]["value"] == \
+        [int(datetime(2026, 11, 4).replace(tzinfo=TZ8).timestamp() * 1000)]
+    updates = [b for m, p, b, _ in fs_calls if p.endswith("/records/batch_update")]
+    creates = [b for m, p, b, _ in fs_calls if p.endswith("/records/batch_create")]
+    assert updates and updates[0]["records"][0]["record_id"] == "recEXIST"
+    assert not creates
+    assert updates[0]["records"][0]["fields"]["近30日消耗"] == 300.0
+
+
+def test_push_without_table_skips(fs_calls, monkeypatch):
+    monkeypatch.setattr(r30, "ROLLING_TABLE_ID", "")
+    r30.push_rolling([{"记录键": "k", "统计日": date(2026, 11, 4)}])
+    assert fs_calls == []
