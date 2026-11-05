@@ -86,3 +86,29 @@ def aggregate_rolling(df, stat_date, window_days=WINDOW_DAYS):
         lambda r: f"{r['统计日'].isoformat()}_{r['account_id']}_"
                   f"{r['编导名称']}_{r['剪辑名称']}", axis=1)
     return g[cols]
+
+
+def rolling_stat_dates(rolling_start, end):
+    """--rolling-start D → 统计日序列 [D..end] 含头尾。"""
+    if rolling_start > end:
+        return []
+    return [rolling_start + timedelta(days=i)
+            for i in range((end - rolling_start).days + 1)]
+
+
+def build_rolling_records(agg):
+    """聚合 DataFrame → 推送行（原生类型；日期保持 date，飞书序列化在 push 段做）。"""
+    out = []
+    for r in agg.to_dict("records"):
+        out.append({
+            "记录键": r["记录键"],
+            "统计日": r["统计日"],
+            "窗口起": r["窗口起"],
+            "窗口止": r["窗口止"],
+            "账号名称": r["账号名称"],
+            "编导名称": r["编导名称"],
+            "剪辑名称": r["剪辑名称"],
+            "近30日素材数": int(r["近30日素材数"]),
+            "近30日消耗": float(r["近30日消耗"]),
+        })
+    return out

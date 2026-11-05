@@ -90,3 +90,26 @@ def test_unlabeled_becomes_marked(monkeypatch):
     df = rolling30.prepare_rolling_df(rows)
     assert df.iloc[0]["编导名称"] == "未标记"
     assert df.iloc[0]["剪辑名称"] == "其他"
+
+
+from rolling30 import build_rolling_records, rolling_stat_dates
+
+
+def test_rolling_stat_dates():
+    days = rolling_stat_dates(date(2026, 11, 2), date(2026, 11, 4))
+    assert days == [date(2026, 11, 2), date(2026, 11, 3), date(2026, 11, 4)]
+    assert rolling_stat_dates(date(2026, 11, 4), date(2026, 11, 4)) == [date(2026, 11, 4)]
+
+
+def test_build_records(parsed_rows):
+    df = rolling30.prepare_rolling_df(parsed_rows)
+    agg = rolling30.aggregate_rolling(rolling30.filter_cohort(df, STAT), STAT)
+    recs = build_rolling_records(agg)
+    assert len(recs) == 2
+    r = recs[0]
+    assert isinstance(r["统计日"], date) and isinstance(r["近30日素材数"], int)
+    assert isinstance(r["近30日消耗"], float)
+    assert set(r) == {"记录键", "统计日", "窗口起", "窗口止", "账号名称",
+                      "编导名称", "剪辑名称", "近30日素材数", "近30日消耗"}
+    keys = [r["记录键"] for r in recs]
+    assert len(keys) == len(set(keys))      # 记录键唯一
