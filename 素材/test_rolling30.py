@@ -151,8 +151,7 @@ def test_push_rolling_idempotent(fs_calls, monkeypatch):
     # 字段补建 + 逐统计日 search + 仅 update（记录键已存在）
     assert any(p.endswith("/fields") and m == "POST" for m, p in methods)
     searches = [b for m, p, b, _ in fs_calls if p.endswith("/records/search")]
-    assert searches and searches[0]["filter"]["conditions"][0]["value"] == \
-        [str(int(datetime(2026, 11, 4).replace(tzinfo=TZ8).timestamp() * 1000))]
+    assert searches and searches[0]["filter"]["conditions"][0]["value"] == ["2026-11-04"]
     updates = [b for m, p, b, _ in fs_calls if p.endswith("/records/batch_update")]
     creates = [b for m, p, b, _ in fs_calls if p.endswith("/records/batch_create")]
     assert updates and updates[0]["records"][0]["record_id"] == "recEXIST"

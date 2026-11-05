@@ -22,7 +22,7 @@ UNLABELED = "未标记"
 # 数据表字段：名称 → (类型码, 属性)；1=文本 2=数字 5=日期
 ROLLING_FIELDS = [
     ("记录键", 1, None),
-    ("统计日", 5, {"date_formatter": "yyyy-MM-dd"}),
+    ("统计日", 1, None),   # 文本 yyyy-MM-dd：search 的日期字段 is 过滤不支持（1254018），文本排序即时间排序
     ("窗口起", 5, {"date_formatter": "yyyy-MM-dd"}),
     ("窗口止", 5, {"date_formatter": "yyyy-MM-dd"}),
     ("账号名称", 1, None),
@@ -138,7 +138,7 @@ def ensure_rolling_fields():
 
 
 def push_rolling(records):
-    """记录键幂等推送：逐统计日 search（日期字段 is=毫秒时间戳）→ create/update。"""
+    """记录键幂等推送：逐统计日 search（统计日文本字段单值检索）→ create/update。"""
     if not ROLLING_TABLE_ID:
         print("[近30日] 未配置 FEISHU_BITABLE_ROLLING_TABLE_ID，跳过推送")
         return
@@ -158,7 +158,7 @@ def push_rolling(records):
                 "field_names": ["记录键"],
                 "filter": {"conjunction": "and", "conditions": [
                     {"field_name": "统计日", "operator": "is",
-                     "value": [str(_to_ms(d))]}]}},   # API value schema 是字符串数组，整数会 1254018 InvalidFilter
+                     "value": [d.isoformat()]}]}},   # 统计日为文本字段，text-is 单值过滤（同主脚本归属月模式）
                 params={"page_size": 500, "page_token": page_token})
             for item in resp.get("items") or []:
                 kv = (item.get("fields") or {}).get("记录键")
@@ -173,7 +173,7 @@ def push_rolling(records):
     def feishu_fields(r):
         return {
             "记录键": r["记录键"],
-            "统计日": _to_ms(r["统计日"]),
+            "统计日": r["统计日"].isoformat(),
             "窗口起": _to_ms(r["窗口起"]),
             "窗口止": _to_ms(r["窗口止"]),
             "账号名称": r["账号名称"],
