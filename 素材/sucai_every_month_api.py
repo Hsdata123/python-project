@@ -19,7 +19,8 @@
 - 输出：不再写 Excel / t_sucai_monthly_report
 - 去掉：月爆款判定（依赖"日期=全部"行，DATE 列下不存在）
 - 部署：Ubuntu，systemd timer 每日 07:00（素材端点 06:30/06:45 完成后）
-- 前置检查：昨日素材端点同步状态须 success 且行数>0，否则退出（防半截数据打标）
+- 前置检查：处理日内**任一账户**素材端点 success 且行数>0 即放行，全部账户无数据才退出；
+  另有数据量校验（每日行数 < 近7天日均 30% 视为半截数据，拦截不入库不推送）
 
 飞书配置（.env，未配置则跳过推送）：
     FEISHU_APP_ID / FEISHU_APP_SECRET          企业自建应用（需 bitable:app 权限）
@@ -73,6 +74,7 @@ FEISHU_FIELDS = [
     ("素材名称", 1, None),
     ("素材创建时间", 5, {"date_formatter": "yyyy-MM-dd HH:mm"}),
     ("编导", 1, None),
+    ("编导名称", 1, None),
     ("剪辑", 1, None),
     ("剪辑名称", 1, None),
     ("整体消耗", 2, None),
@@ -191,6 +193,8 @@ def from_who_video(video_name, account_name=""):
         tag = "林晓榆"
     elif "乐晴" in vn:
         tag = "B乐晴"
+    elif "德昕" in vn:
+        tag = "B德昕"
     elif "AIGC动态创意" in vn:
         tag = "AIGC"
     elif "B无" in vn:
@@ -307,16 +311,41 @@ def parse_args():
 
 
 def precheck(conn, d):
+    """当天任一账户 success 且有行数即放行；全部账户无数据才拦截。
+    （个别账户当日零消耗属正常，不应拦停全链路——2026-10-25 人参#6089 零数据
+     曾因"取最后一条日志"的旧逻辑拦停整个打标+飞书推送）"""
     cur = conn.cursor()
     cur.execute("""SELECT status, row_count FROM _sync_log
-                   WHERE endpoint='overall_material_daily' AND biz_date=%s
-                   ORDER BY id DESC LIMIT 1""", (d,))
-    r = cur.fetchone()
-    if r is None:
+                   WHERE endpoint='overall_material_daily' AND biz_date=%s""", (d,))
+    logs = cur.fetchall()
+    if not logs:
         return False, f"{d} 素材端点无同步记录"
-    status, rc = r
-    if status != "success" or not rc:
-        return False, f"{d} 素材端点状态={status} 行数={rc}"
+    if any(s == "success" and rc for s, rc in logs):
+        return True, ""
+    stat = {}
+    for s, _ in logs:
+        stat[s] = stat.get(s, 0) + 1
+    summary = ", ".join(f"{k}×{v}" for k, v in stat.items())
+    return False, f"{d} 素材端点全部账户无数据（{summary}）"
+
+
+def check_volume(conn, d):
+    """推送前数据量校验：当日行数 vs 前7天日均，低于 30% 视为半截数据。
+    （同步分页中断时会写入少量行且状态仍为 success，行数对照近7日基线可拦住）"""
+    cur = conn.cursor()
+    ids = ", ".join(f"'{a}'" for a in SYNC_ACCOUNTS)
+    cur.execute(f"""SELECT COUNT(*) FROM qianchuan_overall_material_daily
+                    WHERE stat_date=%s AND account_id IN ({ids})""", (d,))
+    today = float(cur.fetchone()[0])
+    cur.execute(f"""SELECT COUNT(*)/7 FROM qianchuan_overall_material_daily
+                    WHERE stat_date BETWEEN %s AND %s AND account_id IN ({ids})""",
+                (d - timedelta(days=7), d - timedelta(days=1)))
+    avg7 = float(cur.fetchone()[0] or 0)
+    if avg7 <= 0:
+        return True, ""      # 无基线（新表/新账户），不拦
+    if today < avg7 * 0.3:
+        return False, (f"{d} 数据量异常：{today} 行 < 近7天日均 {avg7:.0f} 行的 30%，"
+                       f"疑似半截数据，已拦截不入库不推送")
     return True, ""
 
 
@@ -384,9 +413,9 @@ def fs_ensure_fields():
             print(f"  [飞书] 新建字段 {name}")
 
 
-def _clipper_name(clipper, account_name):
-    """剪辑列剔除账号前缀与间隔符 → 纯人名（如 弹动人参旗舰店-B子鱼 → B子鱼）"""
-    s = "" if clipper is None or pd.isna(clipper) else str(clipper)
+def _pure_name(label, account_name):
+    """编导/剪辑列剔除账号前缀与间隔符 → 纯人名（如 弹动人参旗舰店-B子鱼 → B子鱼）"""
+    s = "" if label is None or pd.isna(label) else str(label)
     prefix = f"{account_name}-"
     return s[len(prefix):] if account_name and s.startswith(prefix) else s
 
@@ -430,8 +459,9 @@ def build_feishu_rows(df):
                 "素材名称": row.get("全域素材视频名称"),
                 "素材创建时间": c.to_pydatetime(),
                 "编导": row.get("编导"),
+                "编导名称": _pure_name(row.get("编导"), row.get("账号名称")),
                 "剪辑": row.get("剪辑"),
-                "剪辑名称": _clipper_name(row.get("剪辑"), row.get("账号名称")),
+                "剪辑名称": _pure_name(row.get("剪辑"), row.get("账号名称")),
             }
             for col in FEISHU_NUM_COLS.values():
                 v = row.get(col)
@@ -459,6 +489,7 @@ def push_feishu(rows, skipped):
             "素材名称": r["素材名称"],
             "素材创建时间": _to_ms(r["素材创建时间"]),
             "编导": r["编导"],
+            "编导名称": r["编导名称"],
             "剪辑": r["剪辑"],
             "剪辑名称": r["剪辑名称"],
         }
@@ -518,6 +549,15 @@ def main():
         ok, msg = precheck(conn, d)
         if not ok:
             print(f"[前置检查失败] {msg}", file=sys.stderr)
+            sys.exit(1)
+        d += timedelta(days=1)
+
+    # ---- 推送前数据量校验（窗口内每一天；半截数据不入库不推送）----
+    d = start
+    while d <= end:
+        ok, msg = check_volume(conn, d)
+        if not ok:
+            print(f"[数据量校验失败] {msg}", file=sys.stderr)
             sys.exit(1)
         d += timedelta(days=1)
 
@@ -594,7 +634,7 @@ def main():
     # ---- 写 t_sucai_new_material_daily（飞书新素材表镜像，同事务）----
     if fs_rows:
         nm_cols = ["account_id", "素材ID", "归属月", "日期", "账号名称", "素材名称",
-                   "素材创建时间", "编导", "剪辑", "剪辑名称"] + list(FEISHU_NUM_COLS.values())
+                   "素材创建时间", "编导", "编导名称", "剪辑", "剪辑名称"] + list(FEISHU_NUM_COLS.values())
         ph3 = ", ".join(["%s"] * len(nm_cols))
         col3 = ", ".join(f"`{c}`" for c in nm_cols)
         upd3 = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in nm_cols
