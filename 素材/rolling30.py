@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""rolling30.py — 近30日新素材看板（滚动30日队列 × 窗口合计消耗）
+"""rolling30.py — 近30日新素材看板（滚动30日队列 × 统计日当天（昨日）消耗）
 
 口径（规格：api_data_sync/docs/superpowers/specs/2026-11-05-rolling30-new-material-dashboard-design.md）：
 - 统计日 = 昨日；窗口 = [统计日-29, 统计日] 含头尾，创建窗口与消耗窗口同一段
 - 队列 = 素材创建时间 ∈ 窗口 的素材（创建时间脏值 NaT 不入队）
-- 行 = 统计日 × 账户 × 编导×剪辑组合；指标 = 素材数(nunique) + 窗口内消耗合计(整体消耗)
+- 行 = 统计日 × 账户 × 编导×剪辑组合；指标 = 素材数(nunique) + 统计日当天（昨日）消耗合计(整体消耗)
 - 推送：飞书同 base 新表（FEISHU_BITABLE_ROLLING_TABLE_ID），记录键幂等覆盖
 """
 import time
@@ -29,7 +29,7 @@ ROLLING_FIELDS = [
     ("编导名称", 1, None),
     ("剪辑名称", 1, None),
     ("近30日素材数", 2, None),
-    ("近30日消耗", 2, None),
+    ("昨日消耗", 2, None),   # 口径 v2（2026-11-06）：队列素材仅统计日当天消耗
 ]
 
 ROLLING_TABLE_ID = ""   # main 集成时由 env 注入（后续任务），保持空默认以可测
@@ -70,16 +70,23 @@ def filter_cohort(df, stat_date, window_days=WINDOW_DAYS):
 
 
 def aggregate_rolling(df, stat_date, window_days=WINDOW_DAYS):
-    """队列 → 统计日×账户×编导×剪辑 一行：素材数 + 窗口内消耗合计。"""
+    """队列 → 统计日×账户×编导×剪辑 一行：素材数 + 队列素材统计日当天（昨日）消耗合计。
+
+    口径 v2（2026-11-06）：消耗只计统计日当天；素材数仍为队列全量去重计数。
+    """
     win_start = stat_date - timedelta(days=window_days - 1)
     cols = ["记录键", "统计日", "窗口起", "窗口止", "account_id", "账号名称",
-            "编导名称", "剪辑名称", "近30日素材数", "近30日消耗"]
+            "编导名称", "剪辑名称", "近30日素材数", "昨日消耗"]
     if df.empty:
         return pd.DataFrame(columns=cols)
+    df = df.copy()
+    stat_mask = pd.to_datetime(df["日期"]).dt.date == stat_date
+    df["昨日消耗"] = pd.to_numeric(df["整体消耗"], errors="coerce").fillna(0.0)
+    df.loc[~stat_mask, "昨日消耗"] = 0.0
     g = (df.groupby(["account_id", "账号名称", "编导名称", "剪辑名称"],
                     as_index=False)
-           .agg(近30日素材数=("素材ID", "nunique"), 近30日消耗=("整体消耗", "sum")))
-    g["近30日消耗"] = g["近30日消耗"].fillna(0).astype(float).round(2)
+           .agg(近30日素材数=("素材ID", "nunique"), 昨日消耗=("昨日消耗", "sum")))
+    g["昨日消耗"] = g["昨日消耗"].fillna(0.0).astype(float).round(2)
     g["统计日"] = stat_date
     g["窗口起"] = win_start
     g["窗口止"] = stat_date
@@ -110,7 +117,7 @@ def build_rolling_records(agg):
             "编导名称": r["编导名称"],
             "剪辑名称": r["剪辑名称"],
             "近30日素材数": int(r["近30日素材数"]),
-            "近30日消耗": float(r["近30日消耗"]),
+            "昨日消耗": float(r["昨日消耗"]),
         })
     return out
 
@@ -120,16 +127,29 @@ def _rolling_base():
 
 
 def ensure_rolling_fields():
-    """确保「近30日新素材看板」表字段齐全（缺则建；表本身需在 base 中先建）。"""
+    """确保「近30日新素材看板」表字段齐全（缺则建；表本身需在 base 中先建）。
+
+    口径 v2（2026-11-06）迁移：存量「近30日消耗」字段改名「昨日消耗」。
+    先分页枚举全量字段做改名，再判断缺失建字段，避免刚建的新字段被误改。
+    """
     base = _rolling_base()
-    have, page_token = set(), ""
+    items, page_token = [], ""
     while True:
         d = fs_call("GET", f"{base}/fields",
                     params={"page_size": 100, "page_token": page_token})
-        have |= {f["field_name"] for f in d.get("items") or []}
+        items.extend(d.get("items") or [])
         if not d.get("has_more"):
             break
         page_token = d["page_token"]
+    have = set()
+    for f in items:
+        name = f["field_name"]
+        if name == "近30日消耗":   # 存量字段改名迁移（先改名，后建缺失字段）
+            fs_call("PUT", f"{base}/fields/{f['field_id']}",
+                    body={"field_name": "昨日消耗", "type": 2})
+            print("  [近30日] 字段改名 近30日消耗 → 昨日消耗")
+            name = "昨日消耗"
+        have.add(name)
     for name, ftype, prop in ROLLING_FIELDS:
         if name not in have:
             fs_call("POST", f"{base}/fields",
@@ -180,7 +200,7 @@ def push_rolling(records):
             "编导名称": r["编导名称"],
             "剪辑名称": r["剪辑名称"],
             "近30日素材数": r["近30日素材数"],
-            "近30日消耗": r["近30日消耗"],
+            "昨日消耗": r["昨日消耗"],
         }
 
     to_create = [{"fields": feishu_fields(r)}

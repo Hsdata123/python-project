@@ -30,9 +30,9 @@ def parsed_rows(monkeypatch):
     monkeypatch.setattr(rolling30, "fro_j_video",
                         lambda n, a: f"{a}-李四")
     rows = [
-        # 甲：官方 10-10 创建，窗口内两个消耗日（共 300）
+        # 甲：官方 10-10 创建，10-20 消耗 100（窗口内非统计日）+ 11-04 消耗 50（统计日当天）
         row(OFFICIAL, "M1", date(2026, 10, 20), 100, datetime(2026, 10, 10, 9)),
-        row(OFFICIAL, "M1", date(2026, 11, 3), 200, datetime(2026, 10, 10, 9)),
+        row(OFFICIAL, "M1", date(2026, 11, 4), 50, datetime(2026, 10, 10, 9)),
         # 乙：官方 11-03 创建（窗口末端），只在 11-03 消耗 50
         row(OFFICIAL, "M2", date(2026, 11, 3), 50, datetime(2026, 11, 3, 8)),
         # 丙：人参 10-07 创建，窗口内消耗 70（与官方同编导剪辑名，验证按账户拆行）
@@ -71,14 +71,14 @@ def test_aggregate_grouping(parsed_rows):
     df = rolling30.prepare_rolling_df(parsed_rows)
     sub = rolling30.filter_cohort(df, STAT)
     agg = rolling30.aggregate_rolling(sub, STAT)
-    # 官方×张三×李四：M1+M2 两素材、300；人参同组合拆开：1 素材、70
+    # 官方×张三×李四：M1+M2 两素材、统计日当天仅 50；人参同组合拆开：1 素材、当天 0
     key_official = f"{STAT.isoformat()}_{OFFICIAL}_张三_李四"
     key_rensen = f"{STAT.isoformat()}_{RENSEN}_张三_李四"
     by_key = {r["记录键"]: r for r in agg.to_dict("records")}
     assert by_key[key_official]["近30日素材数"] == 2
-    assert by_key[key_official]["近30日消耗"] == 350   # M1 300 + M2 50
+    assert by_key[key_official]["昨日消耗"] == 50     # 仅统计日 11-04 当天：M1 的 50（M2 无当日行）
     assert by_key[key_rensen]["近30日素材数"] == 1
-    assert by_key[key_rensen]["近30日消耗"] == 70
+    assert by_key[key_rensen]["昨日消耗"] == 0        # M3 当天无消耗
     assert set(agg["窗口起"]) == {WIN_START} and set(agg["窗口止"]) == {STAT}
 
 
@@ -109,9 +109,9 @@ def test_build_records(parsed_rows):
     assert len(recs) == 2
     r = recs[0]
     assert isinstance(r["统计日"], date) and isinstance(r["近30日素材数"], int)
-    assert isinstance(r["近30日消耗"], float)
+    assert isinstance(r["昨日消耗"], float)
     assert set(r) == {"记录键", "统计日", "窗口起", "窗口止", "账号名称",
-                      "编导名称", "剪辑名称", "近30日素材数", "近30日消耗"}
+                      "编导名称", "剪辑名称", "近30日素材数", "昨日消耗"}
     keys = [r["记录键"] for r in recs]
     assert len(keys) == len(set(keys))      # 记录键唯一
 
@@ -145,7 +145,7 @@ def test_push_rolling_idempotent(fs_calls, monkeypatch):
     recs = [{"记录键": "2026-11-04_x_张三_李四", "统计日": date(2026, 11, 4),
              "窗口起": date(2026, 10, 6), "窗口止": date(2026, 11, 4),
              "账号名称": "弹动官方旗舰店", "编导名称": "张三", "剪辑名称": "李四",
-             "近30日素材数": 2, "近30日消耗": 300.0}]
+             "近30日素材数": 2, "昨日消耗": 300.0}]
     r30.push_rolling(recs)
     methods = [(m, p) for m, p, *_ in fs_calls]
     # 字段补建 + 逐统计日 search + 仅 update（记录键已存在）
@@ -156,7 +156,7 @@ def test_push_rolling_idempotent(fs_calls, monkeypatch):
     creates = [b for m, p, b, _ in fs_calls if p.endswith("/records/batch_create")]
     assert updates and updates[0]["records"][0]["record_id"] == "recEXIST"
     assert not creates
-    assert updates[0]["records"][0]["fields"]["近30日消耗"] == 300.0
+    assert updates[0]["records"][0]["fields"]["昨日消耗"] == 300.0
 
 
 def test_push_without_table_skips(fs_calls, monkeypatch):
@@ -175,6 +175,8 @@ def test_run_rolling_compute_and_push(monkeypatch):
             row(OFFICIAL, "M1", date(2026, 11, 3), 100, datetime(2026, 11, 1, 9)),
             row(OFFICIAL, "M1", date(2026, 11, 4), 50, datetime(2026, 11, 1, 9)),
             row(RENSEN, "M2", date(2026, 11, 4), 70, datetime(2026, 10, 7, 9)),
+            # M2 在 11-02 也有消耗：保证 11-03 队列非空（会出记录），但其当天（11-03）消耗为 0
+            row(RENSEN, "M2", date(2026, 11, 2), 30, datetime(2026, 10, 7, 9)),
         ]
 
     monkeypatch.setattr(r30, "fetch_rows", fake_fetch)
@@ -192,6 +194,10 @@ def test_run_rolling_compute_and_push(monkeypatch):
     assert f"2026-11-03_{OFFICIAL}_张三_李四" in keys
     assert f"2026-11-04_{OFFICIAL}_张三_李四" in keys
     assert f"2026-11-04_{RENSEN}_张三_李四" in keys
+    by_key = {r["记录键"]: r for r in pushed[0]}
+    assert by_key[f"2026-11-03_{OFFICIAL}_张三_李四"]["昨日消耗"] == 100.0   # M1 在 11-03 的行
+    assert by_key[f"2026-11-04_{OFFICIAL}_张三_李四"]["昨日消耗"] == 50.0    # M1 在 11-04 的行
+    assert by_key[f"2026-11-03_{RENSEN}_张三_李四"]["昨日消耗"] == 0.0       # M2 当天无行
 
     monkeypatch.setattr(r30, "push_rolling", lambda recs: (_ for _ in ()).throw(
         AssertionError("dry-run 不应推送")))
