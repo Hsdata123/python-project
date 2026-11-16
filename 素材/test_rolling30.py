@@ -214,3 +214,18 @@ def test_parse_args_extended(monkeypatch):
     start, end, rolling_start, dry_run = sm.parse_args()
     assert rolling_start is None and dry_run is False
     assert (end - start).days == 2          # 原默认窗口不变
+
+
+def test_manual_material_override(monkeypatch):
+    """人工识别映射：指定素材ID强制使用人工标注的编导/剪辑（自动加账号前缀）。"""
+    import sucai_every_month_api as sm
+    monkeypatch.setattr(sm, "MANUAL_MATERIAL_LABELS", {"MANUAL_ID": ("B子鱼", "J佳慧")})
+    monkeypatch.setattr(rolling30, "from_who_video", lambda n, a: f"{a}-张三")
+    monkeypatch.setattr(rolling30, "fro_j_video", lambda n, a: f"{a}-J学顺")
+    rows = [row(OFFICIAL, "MANUAL_ID", date(2026, 10, 20), 100, datetime(2026, 10, 10, 9),
+                name="大王~臣妾做不到呀~ 无命名标准素材")]
+    df = rolling30.prepare_rolling_df(rows)
+    assert df.iloc[0]["编导名称"] == "B子鱼"
+    assert df.iloc[0]["剪辑名称"] == "J佳慧"
+    assert df.iloc[0]["编导"] == "弹动官方旗舰店-B子鱼"
+    assert df.iloc[0]["剪辑"] == "弹动官方旗舰店-J佳慧"

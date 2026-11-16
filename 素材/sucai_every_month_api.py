@@ -57,6 +57,24 @@ ACCOUNT_NAME = {"1757724572785671": "弹动官方旗舰店",
                 "1859998937306571": "弹动人参旗舰店",
                 "1875393773286089": "弹动人参旗舰店"}
 
+# 手动识别素材：名称无编导/剪辑标记、自动解析落入 其他 时，人工指定归属（纯名，账号前缀按行内账号自动补齐）
+MANUAL_MATERIAL_LABELS = {
+    "7707925579094409258": ("B子鱼", "J佳慧"),
+}
+
+
+def apply_manual_labels(df):
+    """按素材ID覆盖 编导/剪辑 标签（人工识别素材）。"""
+    if df is None or len(df) == 0 or not MANUAL_MATERIAL_LABELS:
+        return df
+    mask = df["素材ID"].astype(str).isin(MANUAL_MATERIAL_LABELS)
+    for i in df.index[mask]:
+        d_name, j_name = MANUAL_MATERIAL_LABELS[str(df.at[i, "素材ID"])]
+        acct = "" if pd.isna(df.at[i, "账号名称"]) else str(df.at[i, "账号名称"])
+        df.at[i, "编导"] = f"{acct}-{d_name}"
+        df.at[i, "剪辑"] = f"{acct}-{j_name}"
+    return df
+
 # ---- 飞书多维表格（新素材每日消耗 + 月度绩效窗口），未配置则跳过推送 ----
 FEISHU = dict(app_id=os.getenv("FEISHU_APP_ID", ""),
               app_secret=os.getenv("FEISHU_APP_SECRET", ""),
@@ -588,6 +606,7 @@ def main():
     df["全域素材视频名称"] = df["素材名称"].apply(change_wrong_name)
     df["编导"] = df.apply(lambda r: from_who_video(r["全域素材视频名称"], r["账号名称"]), axis=1)
     df["剪辑"] = df.apply(lambda r: fro_j_video(r["全域素材视频名称"], r["账号名称"]), axis=1)
+    df = apply_manual_labels(df)
     df = sucai_label(df)
     df = check_video_name(df)
     df = check_top_video(df)

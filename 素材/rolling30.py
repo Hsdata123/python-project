@@ -13,7 +13,8 @@ from datetime import timedelta
 import pandas as pd
 
 from sucai_every_month_api import (ACCOUNT_NAME, FEISHU, _pure_name,
-                                   _to_ms, change_wrong_name, fetch_rows,
+                                   _to_ms, apply_manual_labels,
+                                   change_wrong_name, fetch_rows,
                                    fro_j_video, from_who_video, fs_call)
 
 WINDOW_DAYS = 30
@@ -39,7 +40,10 @@ _EMPTY_COLS = ["account_id", "素材ID", "日期", "账号名称", "素材名称
 
 
 def prepare_rolling_df(rows):
-    """fetch_rows() 输出 → 聚合所需最小列（复用主脚本的名称解析链路）。"""
+    """fetch_rows() 输出 → 聚合所需最小列（复用主脚本的名称解析链路）。
+
+    人工识别素材（自动解析落入 其他 时人工指定归属）的映射见主脚本 MANUAL_MATERIAL_LABELS。
+    """
     if not rows:
         return pd.DataFrame(columns=_EMPTY_COLS)
     df = pd.DataFrame(rows)
@@ -51,6 +55,7 @@ def prepare_rolling_df(rows):
     df["全域素材视频名称"] = df["素材名称"].apply(change_wrong_name)
     df["编导"] = df.apply(lambda r: from_who_video(r["全域素材视频名称"], r["账号名称"]), axis=1)
     df["剪辑"] = df.apply(lambda r: fro_j_video(r["全域素材视频名称"], r["账号名称"]), axis=1)
+    df = apply_manual_labels(df)   # 人工识别素材按素材ID覆盖编导/剪辑
     df["编导名称"] = df.apply(
         lambda r: (_pure_name(r["编导"], r["账号名称"]) or UNLABELED), axis=1)
     df["剪辑名称"] = df.apply(
