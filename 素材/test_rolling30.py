@@ -229,3 +229,18 @@ def test_manual_material_override(monkeypatch):
     assert df.iloc[0]["剪辑名称"] == "J佳慧"
     assert df.iloc[0]["编导"] == "弹动官方旗舰店-B子鱼"
     assert df.iloc[0]["剪辑"] == "弹动官方旗舰店-J佳慧"
+
+
+def test_check_volume_exemption(monkeypatch):
+    """数据量校验豁免日期：直接放行，不执行任何 SQL。"""
+    import sucai_every_month_api as sm
+
+    class NoSQLCursor:
+        def execute(self, *a, **k):
+            raise AssertionError("豁免日期不应执行 SQL")
+
+    class NoSQLConn:
+        def cursor(self):
+            return NoSQLCursor()
+
+    assert sm.check_volume(NoSQLConn(), date(2026, 11, 21)) == (True, "")

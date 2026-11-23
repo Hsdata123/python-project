@@ -355,9 +355,16 @@ def precheck(conn, d):
     return False, f"{d} 素材端点全部账户无数据（{summary}）"
 
 
+# 数据量校验豁免日期：账户切换/停投等导致的真实低量日（业务确认后加入，跳过校验直接放行）
+CHECK_VOLUME_EXCLUDE_DATES = {"2026-11-21"}
+
+
 def check_volume(conn, d):
     """推送前数据量校验：当日行数 vs 前7天日均，低于 30% 视为半截数据。
-    （同步分页中断时会写入少量行且状态仍为 success，行数对照近7日基线可拦住）"""
+    （同步分页中断时会写入少量行且状态仍为 success，行数对照近7日基线可拦住）
+    豁免日期（CHECK_VOLUME_EXCLUDE_DATES）跳过校验——业务已确认的真实低量日。"""
+    if d.isoformat() in CHECK_VOLUME_EXCLUDE_DATES:
+        return True, ""
     cur = conn.cursor()
     ids = ", ".join(f"'{a}'" for a in SYNC_ACCOUNTS)
     cur.execute(f"""SELECT COUNT(*) FROM qianchuan_overall_material_daily
